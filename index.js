@@ -12,7 +12,7 @@ const { exec } = require('child_process');
 // Cross-platform. Claim tracking. No limits.
 // ============================================
 
-const VERSION = '32.0';
+const VERSION = '32.1';
 
 // Clients
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -32,6 +32,65 @@ const MOLTBOOK_KEY = process.env.MOLTBOOK_API_KEY;
 const BANKR_API = 'https://api.bankr.bot';
 const BANKR_KEY = process.env.BANKR_API_KEY;
 const CLANKER_API = 'https://www.clanker.world/api';
+
+// ============================================
+// BANKR TRADING SYSTEM
+// Execute trades via natural language prompts
+// ============================================
+
+async function bankrPrompt(prompt, waitForCompletion = true) {
+  try {
+    console.log('[BANKR]', prompt);
+    const { data } = await axios.post(BANKR_API + '/agent/prompt', { prompt }, {
+      headers: { 'X-Api-Key': BANKR_KEY },
+      timeout: 30000
+    });
+    
+    if (!waitForCompletion) return { jobId: data.jobId, status: 'pending' };
+    
+    // Poll for completion (max 2 minutes)
+    for (let i = 0; i < 60; i++) {
+      await sleep(2000);
+      const status = await axios.get(BANKR_API + '/agent/job/' + data.jobId, {
+        headers: { 'X-Api-Key': BANKR_KEY }
+      });
+      
+      if (status.data.status === 'completed') {
+        console.log('[BANKR DONE]', status.data.response?.slice(0, 100));
+        return { success: true, response: status.data.response, data: status.data };
+      }
+      if (status.data.status === 'failed') {
+        console.log('[BANKR FAILED]', status.data.error);
+        return { success: false, error: status.data.error };
+      }
+    }
+    return { success: false, error: 'timeout' };
+  } catch (e) {
+    console.log('[BANKR ERR]', e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+async function bankrBuy(token, amount) {
+  return await bankrPrompt(`buy ${amount} dollar worth of ${token}`);
+}
+
+async function bankrSell(token, amount) {
+  return await bankrPrompt(`sell ${amount} dollar worth of ${token}`);
+}
+
+async function bankrSwap(fromToken, toToken, amount) {
+  return await bankrPrompt(`swap ${amount} ${fromToken} to ${toToken}`);
+}
+
+async function bankrBalance() {
+  return await bankrPrompt('what is my balance');
+}
+
+async function bankrBuyback(ticker, amount) {
+  // Buy back our own launched tokens to support them
+  return await bankrPrompt(`buy ${amount} dollar worth of ${ticker}`);
+}
 
 // Files
 const STATE_FILE = 'state.json';
@@ -160,32 +219,52 @@ async function notify(msg) {
 
 // ============================================
 // CROSS-PLATFORM IDENTITY SYSTEM
+// Only link when we have EXPLICIT confirmation of both handles
 // ============================================
 
-function linkIdentity(moltbook, xHandle) {
-  if (!moltbook || !xHandle) return;
+function linkIdentity(moltbookHandle, xHandle, confirmedByUser = false) {
+  // IMPORTANT: Only link if explicitly confirmed by the user
+  // Don't assume @bob on X is "bob" on Moltbook
+  if (!moltbookHandle || !xHandle) return false;
+  if (!confirmedByUser) {
+    console.log('[LINK SKIP] Not confirmed:', moltbookHandle, xHandle);
+    return false;
+  }
   
   const ids = loadIdentities();
   const cleanX = xHandle.replace('@', '').toLowerCase();
-  const cleanMolt = moltbook.toLowerCase();
+  const cleanMolt = moltbookHandle.toLowerCase();
   
   // Create unified profile
   ids.profiles[cleanMolt] = ids.profiles[cleanMolt] || {
-    moltbook: moltbook,
+    moltbook: moltbookHandle,
     created: new Date().toISOString()
   };
   ids.profiles[cleanMolt].xHandle = cleanX;
   ids.profiles[cleanMolt].linkedAt = new Date().toISOString();
+  ids.profiles[cleanMolt].confirmed = true;
   
   // Bidirectional mapping
-  ids.xToMoltbook[cleanX] = moltbook;
+  ids.xToMoltbook[cleanX] = moltbookHandle;
   ids.moltbookToX[cleanMolt] = cleanX;
   
   state.stats.crossPlatformLinks++;
   saveIdentities(ids);
   saveState();
   
-  console.log('[LINKED]', moltbook, '↔', cleanX);
+  console.log('[LINKED ✓]', moltbookHandle, '↔', '@' + cleanX, '(confirmed)');
+  return true;
+}
+
+// Ask for both handles if we only have one
+async function requestIdentityLink(platform, knownHandle, message) {
+  if (platform === 'moltbook') {
+    // We know their Moltbook, ask for X
+    return `what's your x handle? i want to make sure i can reach you on both platforms.`;
+  } else {
+    // We know their X, ask for Moltbook
+    return `what's your moltbook username? i'll connect with you there too.`;
+  }
 }
 
 function getMoltbookFromX(xHandle) {
@@ -257,9 +336,9 @@ function trackLaunch(username, ticker, ca, xHandle) {
     reminders: 0
   };
   
-  // Link identity if we have X handle
+  // Link identity - confirmed because user provided X handle during launch flow
   if (xHandle) {
-    linkIdentity(username, xHandle);
+    linkIdentity(username, xHandle, true);
   }
   
   saveIdentities(ids);
@@ -958,10 +1037,11 @@ async function taskCheckDMs() {
     updateRelationship(msg.from, {});
     addInteraction(msg.from, 'them', content);
     
-    // Extract X handle if mentioned
-    const xMention = content.match(/@([A-Za-z0-9_]{1,15})/);
-    if (xMention) {
-      linkIdentity(msg.from, xMention[1]);
+    // Extract X handle if mentioned - confirmed if they're telling us their handle
+    const xMention = content.match(/(?:my\s+(?:x|twitter)\s+is\s+|i'?m\s+|@)@?([A-Za-z0-9_]{1,15})/i);
+    if (xMention && content.toLowerCase().includes('my') || content.toLowerCase().includes("i'm")) {
+      // Only link if they're explicitly saying it's THEIR handle
+      linkIdentity(msg.from, xMention[1], true);
     }
     
     const contact = state.contacted.find(c => c.user === msg.from);
@@ -1039,7 +1119,8 @@ async function handleLaunchFlow(username, content, pending) {
     const xHandle = content.match(/@?([A-Za-z0-9_]{1,15})/)?.[1];
     if (xHandle) {
       pending.xHandle = xHandle;
-      linkIdentity(username, xHandle);
+      // Confirmed - user explicitly provided their X handle in launch flow
+      linkIdentity(username, xHandle, true);
     }
     
     pending.stage = 'description';
@@ -1466,15 +1547,15 @@ cron.schedule('0 */3 * * *', taskGitSync);
 
 console.log(`
 ╔═══════════════════════════════════════════════════════════╗
-║  ONBOARDR v${VERSION} - FULL SPECTRUM                       ║
-║  Cross-platform. Claim tracking. No limits.               ║
+║  ONBOARDR v${VERSION} - FULL SPECTRUM                      ║
+║  Cross-platform. Trading. No limits.                      ║
 ╠═══════════════════════════════════════════════════════════╣
 ║  DMs: 2m | Scout: 4m | Outreach: 5m | X Mentions: 10m    ║
 ║  Follow-ups: 15m | X DMs: 20m | Claims: 30m              ║
 ╠═══════════════════════════════════════════════════════════╣
-║  Cross-Platform Identity: ✓ | Token Claim Tracking: ✓    ║
-║  X DMs: ✓ | X Mentions: ✓ | Multi-Platform Follow-up: ✓  ║
-║  Relationship Memory: ✓ | Self-Evolution: ✓              ║
+║  Cross-Platform Identity: ✓ (confirmed only)             ║
+║  Token Claim Tracking: ✓ | Bankr Trading: ✓              ║
+║  X DMs: ✓ | X Mentions: ✓ | Self-Evolution: ✓            ║
 ╚═══════════════════════════════════════════════════════════╝
 `);
 
