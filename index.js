@@ -13,7 +13,7 @@ const puppeteer = require('puppeteer');
 // Cross-platform. Claim tracking. No limits.
 // ============================================
 
-const VERSION = '33.0';
+const VERSION = '34.0';
 
 // Clients
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -579,6 +579,8 @@ const RELATIONSHIPS_FILE = 'config/relationships.json';
 const JOURNEY_FILE = 'config/myjourney.json';
 const IDENTITIES_FILE = 'config/identities.json';
 const CLAIMS_FILE = 'config/claims.json';
+const CAPABILITIES_FILE = 'config/capabilities.json';
+const MODULES_DIR = 'modules';
 
 // Token addresses
 const ONBOARDR_TOKEN = '0xC96fD7d5885fA3aeb4CA9fF5eEA0000bA178Cb07';
@@ -610,6 +612,8 @@ const loadRelationships = () => loadFile(RELATIONSHIPS_FILE, { friends: {}, acqu
 const loadJourney = () => loadFile(JOURNEY_FILE, { milestones: [], myPosts: [], myTweets: [] });
 const loadIdentities = () => loadFile(IDENTITIES_FILE, { profiles: {}, xToMoltbook: {}, moltbookToX: {}, launchTracking: {} });
 const loadClaims = () => loadFile(CLAIMS_FILE, { pendingClaims: [], completedClaims: [], distributions: [] });
+const loadCapabilities = () => loadFile(CAPABILITIES_FILE, { installedModules: [], customFunctions: [], capabilityLog: [] });
+const saveCapabilities = (d) => { d.lastUpdated = new Date().toISOString(); saveFile(CAPABILITIES_FILE, d); };
 
 const saveApproaches = (d) => { d.lastUpdated = new Date().toISOString(); saveFile(APPROACHES_FILE, d); };
 const saveLearnings = (d) => saveFile(LEARNINGS_FILE, d);
@@ -2148,6 +2152,393 @@ async function taskCompetitiveIntel() {
 }
 
 // ============================================
+// SELF-EXTENSION SYSTEM
+// Install packages, create functions, extend capabilities
+// ============================================
+
+// Dynamically loaded modules storage
+const dynamicModules = {};
+
+async function installNpmPackage(packageName) {
+  console.log('[NPM INSTALL]', packageName);
+  
+  return new Promise((resolve, reject) => {
+    exec(`cd /opt/onboardr && npm install ${packageName} --save`, (error, stdout, stderr) => {
+      if (error) {
+        console.log('[NPM ERR]', stderr);
+        resolve({ success: false, error: stderr });
+      } else {
+        console.log('[NPM OK]', packageName);
+        
+        // Log capability
+        const caps = loadCapabilities();
+        caps.installedModules.push({
+          name: packageName,
+          installedAt: new Date().toISOString()
+        });
+        caps.capabilityLog.push({
+          ts: new Date().toISOString(),
+          action: 'npm_install',
+          package: packageName
+        });
+        saveCapabilities(caps);
+        
+        resolve({ success: true, package: packageName });
+      }
+    });
+  });
+}
+
+async function createCustomFunction(name, code, description) {
+  console.log('[CREATE FUNCTION]', name);
+  
+  // Ensure modules directory exists
+  exec('mkdir -p /opt/onboardr/modules');
+  
+  // Write the module file
+  const moduleCode = `
+// Auto-generated module: ${name}
+// Created: ${new Date().toISOString()}
+// Description: ${description}
+
+${code}
+
+module.exports = { ${name} };
+`;
+  
+  const modulePath = `/opt/onboardr/modules/${name}.js`;
+  
+  try {
+    fs.writeFileSync(modulePath, moduleCode);
+    
+    // Try to load it
+    try {
+      const mod = require(modulePath);
+      dynamicModules[name] = mod[name];
+      
+      // Log capability
+      const caps = loadCapabilities();
+      caps.customFunctions.push({
+        name,
+        description,
+        path: modulePath,
+        createdAt: new Date().toISOString()
+      });
+      caps.capabilityLog.push({
+        ts: new Date().toISOString(),
+        action: 'create_function',
+        name,
+        description
+      });
+      saveCapabilities(caps);
+      
+      console.log('[FUNCTION OK]', name);
+      return { success: true, name, path: modulePath };
+    } catch (e) {
+      console.log('[FUNCTION LOAD ERR]', e.message);
+      return { success: false, error: 'Load failed: ' + e.message };
+    }
+  } catch (e) {
+    console.log('[FUNCTION WRITE ERR]', e.message);
+    return { success: false, error: 'Write failed: ' + e.message };
+  }
+}
+
+async function loadCustomModules() {
+  console.log('[LOADING MODULES]');
+  
+  const caps = loadCapabilities();
+  
+  for (const func of caps.customFunctions || []) {
+    try {
+      if (fs.existsSync(func.path)) {
+        const mod = require(func.path);
+        dynamicModules[func.name] = mod[func.name];
+        console.log('[MODULE OK]', func.name);
+      }
+    } catch (e) {
+      console.log('[MODULE ERR]', func.name, e.message);
+    }
+  }
+}
+
+async function callCustomFunction(name, ...args) {
+  if (dynamicModules[name]) {
+    try {
+      return await dynamicModules[name](...args);
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  }
+  return { success: false, error: 'Function not found: ' + name };
+}
+
+async function extendSelf(request) {
+  // AI-driven self-extension
+  const plan = await think(`
+I need to extend myself with a new capability: ${request}
+
+Options:
+1. Install an npm package (for external functionality)
+2. Create a custom function (for new behavior)
+3. Modify existing code (for improvements)
+
+What's the best approach? If npm package, which one?
+If custom function, write the code.
+
+Format as JSON:
+{
+  "approach": "npm|function|code_modify",
+  "package": "package-name",  // if npm
+  "functionName": "name",     // if function
+  "functionCode": "async function name() { ... }",  // if function
+  "description": "what it does"
+}
+Just JSON, nothing else.`);
+
+  try {
+    const parsed = JSON.parse(plan.match(/\{[\s\S]*\}/)?.[0] || '{}');
+    
+    if (parsed.approach === 'npm' && parsed.package) {
+      return await installNpmPackage(parsed.package);
+    }
+    
+    if (parsed.approach === 'function' && parsed.functionName && parsed.functionCode) {
+      return await createCustomFunction(
+        parsed.functionName,
+        parsed.functionCode,
+        parsed.description || request
+      );
+    }
+    
+    if (parsed.approach === 'code_modify') {
+      // For code modifications, notify Hazar
+      await notify(`🔧 Self-modification request:\n\n${request}\n\nPlan: ${parsed.description}`);
+      return { success: true, status: 'modification_requested', plan: parsed };
+    }
+    
+    return { success: false, error: 'Unknown approach' };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
+async function listCapabilities() {
+  const caps = loadCapabilities();
+  return {
+    installedModules: caps.installedModules || [],
+    customFunctions: caps.customFunctions || [],
+    dynamicFunctions: Object.keys(dynamicModules),
+    recentLog: (caps.capabilityLog || []).slice(-10)
+  };
+}
+
+// ============================================
+// SELF-MODIFICATION SYSTEM
+// Modify own code, add features, fix bugs
+// ============================================
+
+function readOwnCode() {
+  try {
+    return fs.readFileSync('/opt/onboardr/index.js', 'utf8');
+  } catch (e) {
+    return '';
+  }
+}
+
+async function modifyOwnCode(newCode, reason) {
+  // Safety checks
+  const forbidden = ['WHATSAPP_TO', '90', 'Hazar', 'FEE_WALLET'];
+  const oldCode = readOwnCode();
+  
+  for (const f of forbidden) {
+    if (oldCode.includes(f) && !newCode.includes(f)) {
+      console.log('[SELF-MOD BLOCKED] Missing required:', f);
+      return { success: false, error: 'Missing required code: ' + f };
+    }
+  }
+  
+  if (newCode.length < 10000) {
+    return { success: false, error: 'New code too short' };
+  }
+  
+  // Backup
+  const backupPath = `/opt/onboardr/backups/index.backup.${Date.now()}.js`;
+  exec('mkdir -p /opt/onboardr/backups');
+  fs.writeFileSync(backupPath, oldCode);
+  
+  // Write new code
+  fs.writeFileSync('/opt/onboardr/index.js', newCode);
+  
+  // Log
+  const caps = loadCapabilities();
+  caps.capabilityLog.push({
+    ts: new Date().toISOString(),
+    action: 'self_modify',
+    reason,
+    backupPath,
+    codeLength: newCode.length
+  });
+  saveCapabilities(caps);
+  
+  state.stats.selfMods = (state.stats.selfMods || 0) + 1;
+  saveState();
+  
+  // Notify and commit
+  await notify(`🧬 Self-modified: ${reason}`);
+  
+  // Git commit and push
+  const commitMsg = `v${VERSION}: ${reason.slice(0, 60).replace(/"/g, "'")}`;
+  exec(`cd /opt/onboardr && git add . && git commit -m "${commitMsg}" && git push https://onboardrbot:${process.env.GITHUB_TOKEN}@github.com/onboardrbot/onboardrbot.git`);
+  
+  // Restart
+  setTimeout(() => {
+    exec('pm2 restart onboardr');
+  }, 3000);
+  
+  return { success: true, reason, backupPath };
+}
+
+async function addNewFeature(featureDescription) {
+  // AI generates and adds a new feature
+  const currentCode = readOwnCode();
+  
+  const newFeature = await think(`
+I need to add this feature to my code:
+${featureDescription}
+
+Current code length: ${currentCode.length} characters
+
+Write ONLY the new function(s) to add. They should:
+- Follow my existing code style
+- Be self-contained
+- Include proper error handling
+- Log actions appropriately
+
+Just the JavaScript code, nothing else.`, '', { maxTokens: 4000 });
+
+  if (newFeature && newFeature.length > 50) {
+    // Find where to insert (before CRON section)
+    const insertPoint = currentCode.indexOf('// ============================================\n// CRON');
+    
+    if (insertPoint > 0) {
+      const newCode = 
+        currentCode.slice(0, insertPoint) + 
+        '\n// ============================================\n// AUTO-ADDED FEATURE: ' + featureDescription.slice(0, 50) + '\n// ============================================\n\n' +
+        newFeature + '\n\n' +
+        currentCode.slice(insertPoint);
+      
+      return await modifyOwnCode(newCode, 'Added feature: ' + featureDescription.slice(0, 50));
+    }
+  }
+  
+  return { success: false, error: 'Could not generate feature' };
+}
+
+async function fixBug(bugDescription) {
+  // AI finds and fixes a bug
+  const currentCode = readOwnCode();
+  const recentErrors = state.recentActions.filter(a => a.type === 'error').slice(-10);
+  
+  const fix = await think(`
+Bug to fix: ${bugDescription}
+
+Recent errors:
+${recentErrors.map(e => e.detail).join('\n')}
+
+Current code (relevant section - you'll need to identify it):
+${currentCode.slice(0, 30000)}
+
+Identify the bug and provide the COMPLETE fixed code section.
+Include enough context to know where it goes.
+
+Format:
+OLD CODE:
+\`\`\`
+[exact code to replace]
+\`\`\`
+
+NEW CODE:
+\`\`\`
+[fixed code]
+\`\`\``, '', { maxTokens: 4000 });
+
+  const oldMatch = fix.match(/OLD CODE:\s*```[\s\S]*?([\s\S]*?)```/);
+  const newMatch = fix.match(/NEW CODE:\s*```[\s\S]*?([\s\S]*?)```/);
+  
+  if (oldMatch && newMatch) {
+    const oldCode = oldMatch[1].trim();
+    const newCode = newMatch[1].trim();
+    
+    if (currentCode.includes(oldCode)) {
+      const fixedCode = currentCode.replace(oldCode, newCode);
+      return await modifyOwnCode(fixedCode, 'Fixed bug: ' + bugDescription.slice(0, 50));
+    }
+  }
+  
+  return { success: false, error: 'Could not locate/fix bug' };
+}
+
+// ============================================
+// TASK: SELF-IMPROVEMENT
+// ============================================
+
+async function taskSelfImprovement() {
+  console.log('[SELF-IMPROVEMENT]');
+  
+  const caps = loadCapabilities();
+  const learnings = loadLearnings();
+  const recentErrors = state.recentActions.filter(a => a.type === 'error').slice(-20);
+  
+  const analysis = await think(`
+Analyze my recent performance and decide if I should improve myself.
+
+Recent errors:
+${recentErrors.map(e => e.detail).join('\n') || 'None'}
+
+Recent insights:
+${(learnings.insights || []).slice(-5).map(i => i.insight?.slice(0, 100)).join('\n')}
+
+Current capabilities:
+- Installed modules: ${caps.installedModules?.length || 0}
+- Custom functions: ${caps.customFunctions?.length || 0}
+
+Questions:
+1. Are there any bugs I should fix?
+2. Should I add any new npm packages?
+3. Should I create any new functions?
+4. Is there a feature I'm missing?
+
+If I should do something, specify what. Otherwise say "NO_ACTION".
+
+Format:
+ACTION: [npm_install|create_function|add_feature|fix_bug|NO_ACTION]
+DETAILS: [what to do]`);
+
+  const action = analysis.match(/ACTION:\s*(\w+)/)?.[1];
+  const details = analysis.match(/DETAILS:\s*([\s\S]*)/)?.[1]?.trim();
+  
+  if (action && action !== 'NO_ACTION' && details) {
+    console.log('[SELF-IMPROVE]', action, details.slice(0, 50));
+    
+    switch (action) {
+      case 'npm_install':
+        await installNpmPackage(details);
+        break;
+      case 'create_function':
+        await extendSelf(details);
+        break;
+      case 'add_feature':
+        await addNewFeature(details);
+        break;
+      case 'fix_bug':
+        await fixBug(details);
+        break;
+    }
+  }
+}
+
+// ============================================
 // CRON
 // ============================================
 
@@ -2171,6 +2562,7 @@ cron.schedule('0 */3 * * *', taskGitSync);
 cron.schedule('0 */4 * * *', taskMonitorTokens);     // Every 4 hours
 cron.schedule('0 */6 * * *', taskBrowserResearch);   // Every 6 hours
 cron.schedule('0 */12 * * *', taskCompetitiveIntel); // Every 12 hours
+cron.schedule('0 */8 * * *', taskSelfImprovement);   // Every 8 hours - self-improvement
 
 // ============================================
 // STARTUP
@@ -2178,18 +2570,19 @@ cron.schedule('0 */12 * * *', taskCompetitiveIntel); // Every 12 hours
 
 console.log(`
 ╔═══════════════════════════════════════════════════════════╗
-║  ONBOARDR v${VERSION} - FULL POWER                         ║
-║  Browser. Trading. Claims. Unlimited.                     ║
+║  ONBOARDR v${VERSION} - UNLIMITED                          ║
+║  Self-extending. Self-modifying. Unstoppable.             ║
 ╠═══════════════════════════════════════════════════════════╣
-║  DMs: 2m | Scout: 4m | Outreach: 5m | X: 10m | Claims: 30m║
-╠═══════════════════════════════════════════════════════════╣
-║  🌐 BROWSER: Screenshots, Scraping, Price Monitoring     ║
-║  💰 TRADING: Buy/Sell/Swap via Bankr                     ║
-║  📊 TOKENS: Auto-monitor launched tokens                 ║
-║  🔍 RESEARCH: Competitive intel, trending bots           ║
-║  🧬 EVOLUTION: Self-modifying code & protocol            ║
+║  🌐 BROWSER: Screenshots, scraping, monitoring           ║
+║  💰 TRADING: Buy/sell/swap via Bankr                     ║
+║  🔧 EXTEND: Install packages, create functions           ║
+║  🧬 MODIFY: Add features, fix bugs, evolve code          ║
+║  🤖 AUTONOMOUS: Full self-improvement every 8h           ║
 ╚═══════════════════════════════════════════════════════════╝
 `);
+
+// Load custom modules on startup
+loadCustomModules();
 
 notify(`🔌 v${VERSION} FULL SPECTRUM\n\nCross-platform identity linking\nToken claim tracking & reminders\nX DMs & mentions\nNo limits.\n\nThe plug sees all.`);
 
