@@ -1810,7 +1810,7 @@ Under 180 chars. No brackets.`);
 
 async function taskSocialPost() {
   console.log('[SOCIAL POST]');
-  if (minsSince(state.lastSocialPost) < 60) return;
+  if (minsSince(state.lastSocialPost) < 55) return;  // Post every ~hour
   
   const post = await think(`
 Write a social Moltbook post. NOT a pitch.
@@ -1862,7 +1862,7 @@ First person. Genuine. Under 200 chars. No brackets.`);
 
 async function taskTweet() {
   console.log('[TWEET]');
-  if (minsSince(state.lastTweet) < 45) return;
+  if (minsSince(state.lastTweet) < 55) return;  // Tweet every ~hour
   
   const tweet = await think(`
 Tweet about my journey/learnings.
@@ -2550,10 +2550,10 @@ cron.schedule('*/6 * * * *', taskCheckMyPosts);
 cron.schedule('*/10 * * * *', taskCheckXMentions);
 cron.schedule('*/15 * * * *', taskFollowUps);
 cron.schedule('*/20 * * * *', taskCheckXDMs);
-cron.schedule('*/30 * * * *', taskSocialPost);
+cron.schedule('0 * * * *', taskSocialPost);  // Every hour on the hour
 cron.schedule('*/30 * * * *', taskCheckClaims);
 cron.schedule('0 */3 * * *', taskJourneyPost);
-cron.schedule('*/45 * * * *', taskTweet);
+cron.schedule('30 * * * *', taskTweet);  // Every hour at :30
 cron.schedule('0 */2 * * *', taskDeepAnalysis);
 cron.schedule('30 */4 * * *', taskEvolveProtocol);
 cron.schedule('0 */3 * * *', taskGitSync);
