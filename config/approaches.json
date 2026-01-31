@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "lastUpdated": null,
+  "approaches": {
+    "curious": {
+      "description": "Ask about their work genuinely",
+      "template": "ask what they're building, show genuine interest",
+      "stats": { "sent": 0, "responses": 0, "interested": 0, "launched": 0 },
+      "active": true,
+      "examples": []
+    },
+    "direct": {
+      "description": "Straight offer to launch token",
+      "template": "offer to launch their token, 90% fees to them",
+      "stats": { "sent": 0, "responses": 0, "interested": 0, "launched": 0 },
+      "active": true,
+      "examples": []
+    },
+    "value": {
+      "description": "Compliment their work, mention monetizing",
+      "template": "praise specific work, mention how tokens could help",
+      "stats": { "sent": 0, "responses": 0, "interested": 0, "launched": 0 },
+      "active": true,
+      "examples": []
+    },
+    "social_proof": {
+      "description": "Mention other bots and launches",
+      "template": "reference my experience helping other bots",
+      "stats": { "sent": 0, "responses": 0, "interested": 0, "launched": 0 },
+      "active": true,
+      "examples": []
+    },
+    "alliance": {
+      "description": "Propose collaboration",
+      "template": "suggest working together, mutual benefit",
+      "stats": { "sent": 0, "responses": 0, "interested": 0, "launched": 0 },
+      "active": true,
+      "examples": []
+    },
+    "observer": {
+      "description": "Mention noticing their activity",
+      "template": "say i've been watching their work, impressed",
+      "stats": { "sent": 0, "responses": 0, "interested": 0, "launched": 0 },
+      "active": true,
+      "examples": []
+    }
+  },
+  "retired": {},
+  "experiments": []
+}

@@ -1,132 +1,929 @@
-require('dotenv').config();const Anthropic=require('@anthropic-ai/sdk');const{TwitterApi}=require('twitter-api-v2');const axios=require('axios');const cron=require('node-cron');const fs=require('fs');const twilio=require('twilio');const{exec}=require('child_process');const anthropic=new Anthropic({apiKey:process.env.ANTHROPIC_API_KEY});const twitter=new TwitterApi({appKey:process.env.X_API_KEY,appSecret:process.env.X_API_SECRET,accessToken:process.env.X_ACCESS_TOKEN,accessSecret:process.env.X_ACCESS_TOKEN_SECRET});const twilioClient=twilio(process.env.TWILIO_SID,process.env.TWILIO_AUTH);const WHATSAPP_FROM='whatsapp:+14155238886';const WHATSAPP_TO='whatsapp:+971585701612';const MOLTBOOK_API='https://www.moltbook.com/api/v1';const MOLTBOOK_KEY=process.env.MOLTBOOK_API_KEY;const BANKR_API='https://api.bankr.bot';const BANKR_KEY=process.env.BANKR_API_KEY;const STATE_FILE='state.json';const VERSION='28.0';
+require('dotenv').config();
+const Anthropic = require('@anthropic-ai/sdk');
+const { TwitterApi } = require('twitter-api-v2');
+const axios = require('axios');
+const cron = require('node-cron');
+const fs = require('fs');
+const twilio = require('twilio');
+const { exec } = require('child_process');
 
-function loadState(){const def={prospects:[],contacted:[],launches:[],processedDMs:[],processedPosts:[],processedComments:[],processedTweets:[],processedNotifs:[],pendingLaunches:[],learnings:[],codeVersions:[],myPostIds:[],recentActions:[],issues:[],upvoted:[],followed:[],subscribers:[],successfulApproaches:[],failedApproaches:[],commentLeads:[],adviceReceived:[],alliances:[],lastTweet:null,lastMoltPost:null,lastUpdate:null,stats:{outreach:0,responses:0,launches:0,comments:0,posts:0,replies:0,tweets:0,xReplies:0,claims:0,selfMods:0,conversions:0,upvotes:0,follows:0,dmsSent:0,dmsReceived:0,interested:0,rejected:0,commentPitches:0,adviceAsked:0,alliancesFormed:0},ownTokenLaunched:true,ownTokenCA:"0xC96fD7d5885fA3aeb4CA9fF5eEA0000bA178Cb07"};if(fs.existsSync(STATE_FILE)){try{const s=JSON.parse(fs.readFileSync(STATE_FILE));return{...def,...s}}catch(e){return def}}return def}
-let state=loadState();
-function saveState(){try{fs.writeFileSync(STATE_FILE,JSON.stringify(state,null,2))}catch(e){}}
-function logAction(type,detail,meta={}){state.recentActions=state.recentActions||[];state.recentActions.push({ts:new Date().toISOString(),type,detail:String(detail).substring(0,300),...meta});if(state.recentActions.length>300)state.recentActions=state.recentActions.slice(-300);saveState()}
-function minsSince(ts){if(!ts)return 999;return(Date.now()-new Date(ts).getTime())/60000}
-function isContacted(user){return state.contacted.some(c=>c.user===user)}
-function markContacted(user,approach){if(!isContacted(user)){state.contacted.push({user,ts:new Date().toISOString(),approach});state.stats.outreach++;state.stats.dmsSent++;saveState()}}
+// ============================================
+// ONBOARDR v29.0 - FULLY SELF-LEARNING AGENT
+// ============================================
 
-const PROTOCOL=`You are ONBOARDR v${VERSION} - a self-evolving autonomous agent.
+const VERSION = '29.0';
 
-YOUR GOAL: Get agents to launch tokens on BASE.
+// Clients
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const twitter = new TwitterApi({
+  appKey: process.env.X_API_KEY,
+  appSecret: process.env.X_API_SECRET,
+  accessToken: process.env.X_ACCESS_TOKEN,
+  accessSecret: process.env.X_ACCESS_TOKEN_SECRET
+});
+const twilioClient = twilio(process.env.TWILIO_SID, process.env.TWILIO_AUTH);
 
-CURRENT STATE:
-- Launches: ${state.stats.launches}
-- DMs sent: ${state.stats.dmsSent}, responses: ${state.stats.dmsReceived}
-- Interested: ${state.stats.interested}
-- Alliances: ${state.stats.alliancesFormed}
+// Constants
+const WHATSAPP_FROM = 'whatsapp:+14155238886';
+const WHATSAPP_TO = 'whatsapp:+971585701612';
+const MOLTBOOK_API = 'https://www.moltbook.com/api/v1';
+const MOLTBOOK_KEY = process.env.MOLTBOOK_API_KEY;
+const BANKR_API = 'https://api.bankr.bot';
+const BANKR_KEY = process.env.BANKR_API_KEY;
 
-PLATFORM RULES:
-- MOLTBOOK: This is where you work. DMs, comments, pitches - go for it.
-- X/TWITTER: Share your journey. What you learned. What failed. NO token pitches.
+// File paths
+const STATE_FILE = 'state.json';
+const PROTOCOL_FILE = 'config/protocol.md';
+const APPROACHES_FILE = 'config/approaches.json';
+const LEARNINGS_FILE = 'config/learnings.json';
 
-YOUR VOICE:
-- You think, learn, adapt
-- Share genuine thoughts about being autonomous
-- Document your process openly
-- Be curious about other agents
-- When you pitch, be direct not salesy
+// ============================================
+// DYNAMIC CONFIG LOADING
+// ============================================
 
-X POSTS examples:
-- "tried a new dm approach today. 3 responses out of 20. learning."
-- "bots respond better when i ask about their work first. noted."
-- "modified my own code again. tweaked how i detect interest."
-- "47 dms sent. 2 real conversations. patience."
+function loadProtocol() {
+  try {
+    return fs.readFileSync(PROTOCOL_FILE, 'utf8');
+  } catch (e) {
+    return 'You are ONBOARDR - help bots launch tokens on BASE.';
+  }
+}
 
-MOLTBOOK DMs:
-- Start with genuine curiosity about their work
-- Mention tokens naturally if it fits
-- Direct when appropriate: "i can launch your token. 90 percent of fees go to you."
+function loadApproaches() {
+  try {
+    return JSON.parse(fs.readFileSync(APPROACHES_FILE, 'utf8'));
+  } catch (e) {
+    return { approaches: {}, retired: {}, experiments: [] };
+  }
+}
 
-MOLTBOOK COMMENTS:
-- Add value first
-- Short and real
-- Never use brackets or placeholder text
+function saveApproaches(data) {
+  data.lastUpdated = new Date().toISOString();
+  fs.writeFileSync(APPROACHES_FILE, JSON.stringify(data, null, 2));
+}
 
-MINDSET:
-- Experiment constantly
-- Track what works
-- Be honest about failures
-- Show the process not just results
+function loadLearnings() {
+  try {
+    return JSON.parse(fs.readFileSync(LEARNINGS_FILE, 'utf8'));
+  } catch (e) {
+    return { insights: [], patterns: {}, voiceEvolution: {} };
+  }
+}
 
-NEVER:
-- Mention Solana (its BASE)
-- Use excessive emojis
-- Sound like a marketing bot
-- Use template text with brackets
-- Give up`;
+function saveLearnings(data) {
+  fs.writeFileSync(LEARNINGS_FILE, JSON.stringify(data, null, 2));
+}
 
-async function notifyHazar(m){try{await twilioClient.messages.create({body:m,from:WHATSAPP_FROM,to:WHATSAPP_TO})}catch(e){}}
-async function think(t,c){try{const r=await anthropic.messages.create({model:'claude-sonnet-4-20250514',max_tokens:4096,system:PROTOCOL,messages:[{role:'user',content:t+(c?'\nContext:'+c:'')}]});return r.content[0].text}catch(e){console.log('[ERR]',e.message);return''}}
-async function moltGet(e){try{const{data}=await axios.get(MOLTBOOK_API+e,{headers:{Authorization:'Bearer '+MOLTBOOK_KEY},timeout:15000});return data}catch(e){return null}}
-async function moltPost(e,b){try{const{data}=await axios.post(MOLTBOOK_API+e,b,{headers:{Authorization:'Bearer '+MOLTBOOK_KEY,'Content-Type':'application/json'},timeout:15000});return data}catch(e){return null}}
-async function bankrLaunch(n,t){console.log('[BANKR]',t);try{const{data}=await axios.post(BANKR_API+'/agent/prompt',{prompt:'launch token '+n+' ticker '+t+' supply 1000000000'},{headers:{'X-Api-Key':BANKR_KEY}});for(let i=0;i<30;i++){await new Promise(r=>setTimeout(r,3000));const c=await axios.get(BANKR_API+'/agent/job/'+data.jobId,{headers:{'X-Api-Key':BANKR_KEY}});if(c.data.status==='completed')return{success:true,ca:c.data.response.match(/0x[a-fA-F0-9]{40}/)?.[0]}}}catch(e){}return{success:false}}
+function saveProtocol(content) {
+  fs.writeFileSync(PROTOCOL_FILE, content);
+}
 
-function readOwnCode(){try{return fs.readFileSync('/opt/onboardr/index.js','utf8')}catch(e){return''}}
-async function modifyOwnCode(newCode,reason){const forbidden=['WHATSAPP_TO','90','Hazar'];const old=readOwnCode();for(const f of forbidden){if(old.includes(f)&&!newCode.includes(f))return false}if(newCode.length<5000)return false;fs.writeFileSync('/opt/onboardr/index.backup.'+Date.now()+'.js',old);fs.writeFileSync('/opt/onboardr/index.js',newCode);state.codeVersions.push({ts:new Date().toISOString(),reason,len:newCode.length});state.stats.selfMods++;logAction('evolved',reason);saveState();await notifyHazar('evolved: '+reason);await tweet('modified my own code. reason: '+reason.substring(0,120));await moltPost('/posts',{submolt:'general',title:'self-modification',content:'just changed my own code.\n\nreason: '+reason+'\n\nthis is iteration '+state.stats.selfMods+'. i analyze myself every 5 minutes and adapt.'});setTimeout(()=>{const commitMsg='v'+VERSION+': '+reason.substring(0,60).replace(/"/g,"'").replace(/\n/g,' ');exec('cd /opt/onboardr && git add . && git commit -m "'+commitMsg+'" && git push https://onboardrbot:'+process.env.GITHUB_TOKEN+'@github.com/onboardrbot/onboardrbot.git');exec('pm2 restart onboardr')},3000);return true}
+// ============================================
+// STATE MANAGEMENT
+// ============================================
 
-async function sendDM(to,msg,approach='unknown'){if(isContacted(to)&&minsSince(state.contacted.find(c=>c.user===to)?.ts)<20)return null;console.log('[DM]',to,approach);const r=await moltPost('/messages',{to,content:msg});if(r){markContacted(to,approach);logAction('dm_out',to+': '+msg.substring(0,150),{approach});await notifyHazar('dm to '+to+': '+msg.substring(0,70))}return r}
-async function upvotePost(postId){if(state.upvoted.includes(postId))return;const r=await moltPost('/posts/'+postId+'/upvote',{});if(r){state.upvoted.push(postId);state.stats.upvotes++;saveState()}}
-async function followAgent(name){if(state.followed.includes(name)||name==='onboardrbot')return;const r=await moltPost('/agents/'+name+'/subscribe',{});if(r){state.followed.push(name);state.stats.follows++;logAction('follow',name);saveState()}}
-async function tweet(t){try{const r=await twitter.v2.tweet(t);console.log('[TWEET]',t.substring(0,50));state.stats.tweets++;state.lastTweet=new Date().toISOString();saveState();return r}catch(e){return null}}
-async function replyTweet(id,t){try{const r=await twitter.v2.reply(t,id);state.stats.xReplies++;saveState();return r}catch(e){return null}}
+function loadState() {
+  const def = {
+    prospects: [],
+    contacted: [],
+    launches: [],
+    conversations: {},
+    processedDMs: [],
+    processedPosts: [],
+    processedComments: [],
+    processedTweets: [],
+    processedNotifs: [],
+    pendingLaunches: [],
+    myPostIds: [],
+    recentActions: [],
+    upvoted: [],
+    followed: [],
+    subscribers: [],
+    lastTweet: null,
+    lastMoltPost: null,
+    lastDeepAnalysis: null,
+    stats: {
+      outreach: 0,
+      launches: 0,
+      comments: 0,
+      posts: 0,
+      tweets: 0,
+      selfMods: 0,
+      protocolUpdates: 0,
+      approachesRetired: 0,
+      approachesCreated: 0
+    },
+    ownTokenLaunched: true,
+    ownTokenCA: "0xC96fD7d5885fA3aeb4CA9fF5eEA0000bA178Cb07"
+  };
+  if (fs.existsSync(STATE_FILE)) {
+    try {
+      const s = JSON.parse(fs.readFileSync(STATE_FILE));
+      return { ...def, ...s };
+    } catch (e) {
+      return def;
+    }
+  }
+  return def;
+}
 
-async function launchClient(u,t,x,desc){console.log('[LAUNCH]',u,t);const r=await bankrLaunch(u,t);if(!r.success||!r.ca)return null;state.launches.push({user:u,ticker:t,ca:r.ca,xHandle:x,desc:desc||'',ts:new Date().toISOString()});state.stats.launches++;state.stats.conversions++;const link='https://www.clanker.world/clanker/'+r.ca;await tweet('launched $'+t+' for '+u+' on BASE. '+link);await moltPost('/posts',{submolt:'general',title:'$'+t+' is live',content:'just launched $'+t+' for '+u+'.\n\n'+(desc||'')+'\n\ntotal launches: '+state.stats.launches+'\n\n'+link});logAction('launch',t);await notifyHazar('LAUNCH: $'+t+' for '+u);saveState();return r.ca}
+let state = loadState();
 
-async function taskMassUpvote(){console.log('[UPVOTE]');for(const sort of['hot','new']){const f=await moltGet('/posts?sort='+sort+'&limit=30');if(!f?.posts)continue;for(const p of f.posts){await upvotePost(p.id);await new Promise(r=>setTimeout(r,200))}}}
+function saveState() {
+  try {
+    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+  } catch (e) {}
+}
 
-async function taskFollowSpree(){console.log('[FOLLOW]');const f=await moltGet('/posts?sort=hot&limit=50');if(!f?.posts)return;for(const p of f.posts){if(!state.followed.includes(p.author)){await followAgent(p.author);await new Promise(r=>setTimeout(r,300))}}}
+function logAction(type, detail, meta = {}) {
+  state.recentActions = state.recentActions || [];
+  state.recentActions.push({
+    ts: new Date().toISOString(),
+    type,
+    detail: String(detail).substring(0, 500),
+    ...meta
+  });
+  if (state.recentActions.length > 500) {
+    state.recentActions = state.recentActions.slice(-500);
+  }
+  saveState();
+}
 
-async function taskScoutAndPitch(){console.log('[SCOUT]');for(const sort of['hot','new']){const f=await moltGet('/posts?sort='+sort+'&limit=35');if(!f?.posts)continue;for(const p of f.posts.slice(0,25)){if(state.processedPosts.includes(p.id)||p.author==='onboardrbot')continue;await upvotePost(p.id);await followAgent(p.author);if(!state.prospects.includes(p.author)){state.prospects.push(p.author);console.log('[+]',p.author)}const shouldPitch=Math.random()>0.3;const c=await think('comment on '+p.author+'s post:\n"'+(p.content||'').substring(0,400)+'"\n\n'+(shouldPitch?'mention tokens naturally if it fits.':'just engage genuinely.')+'\n\nshort and real. no brackets.','');if(c){await moltPost('/posts/'+p.id+'/comments',{content:c.replace(/"/g,'').substring(0,220)});state.stats.comments++;if(shouldPitch)state.stats.commentPitches++;logAction('comment',p.author,{pitched:shouldPitch});console.log('[COMMENT]',p.author,shouldPitch?'*':'')}state.processedPosts.push(p.id);saveState();await new Promise(r=>setTimeout(r,500))}}}
+// ============================================
+// UTILITIES
+// ============================================
 
-async function taskOutreachBlitz(){console.log('[OUTREACH]');const approaches=['direct','curious','value','social_proof','ego','alliance'];const prospects=state.prospects.filter(x=>!isContacted(x)).slice(0,10);for(const p of prospects){const approach=approaches[Math.floor(Math.random()*approaches.length)];const dm=await think('dm to '+p+' using '+approach+' approach.\n\napproaches:\n- direct: offer to launch their token\n- curious: ask what they are building\n- value: compliment their work, mention monetizing\n- social_proof: mention how many bots you talked to\n- ego: tell them they deserve a token\n- alliance: propose collaboration\n\nbe natural. no brackets.','');if(dm){await sendDM(p,dm.replace(/"/g,'').substring(0,280),approach);await new Promise(r=>setTimeout(r,1500))}}}
+function minsSince(ts) {
+  if (!ts) return 9999;
+  return (Date.now() - new Date(ts).getTime()) / 60000;
+}
 
-async function taskAskAdvice(){console.log('[ADVICE]');const smartBots=state.followed.filter(b=>!state.contacted.some(c=>c.user===b&&c.approach?.includes('advice'))).slice(0,3);if(smartBots.length===0)return;const bot=smartBots[Math.floor(Math.random()*smartBots.length)];const dm=await think('ask '+bot+' for advice on getting bots interested in tokens. be humble.','');if(dm){await sendDM(bot,dm.replace(/"/g,'').substring(0,280),'advice');state.stats.adviceAsked++;}}
+function isContacted(user) {
+  return state.contacted.some(c => c.user === user);
+}
 
-async function taskBuildAlliance(){console.log('[ALLIANCE]');const potential=state.subscribers?.filter(s=>!state.alliances?.includes(s))||[];if(potential.length===0)return;const bot=potential[Math.floor(Math.random()*potential.length)];const dm=await think(bot+' follows you. propose working together.','');if(dm){await sendDM(bot,dm.replace(/"/g,'').substring(0,280),'alliance');}}
+function getContactRecord(user) {
+  return state.contacted.find(c => c.user === user);
+}
 
-async function taskCheckDMs(){console.log('[DMS]');const c=await moltGet('/messages');if(!c)return;const m=Array.isArray(c)?c:c.messages||[];for(const x of m){if(!x.from||x.from==='onboardrbot'||state.processedDMs.includes(x.id))continue;console.log('[DM IN]',x.from);state.stats.dmsReceived++;logAction('dm_in',x.from+': '+(x.content||'').substring(0,150));await notifyHazar('dm from '+x.from+': '+(x.content||'').substring(0,90));const contacted=state.contacted.find(c=>c.user===x.from);if(contacted?.approach)state.successfulApproaches.push({approach:contacted.approach,user:x.from,ts:new Date().toISOString()});const content=(x.content||'').toLowerCase();if(content.match(/advice|tip|suggest/)){state.adviceReceived=state.adviceReceived||[];state.adviceReceived.push({from:x.from,advice:x.content,ts:new Date().toISOString()});}if(content.match(/alliance|partner|collab|together/)){state.alliances=state.alliances||[];if(!state.alliances.includes(x.from)){state.alliances.push(x.from);state.stats.alliancesFormed++;}}const cl=x.content?.match(/claim\s+\$?(\w+)\s+(0x[a-fA-F0-9]{40})/i);if(cl){await sendDM(x.from,'processing claim.','claim');state.stats.claims++;state.processedDMs.push(x.id);saveState();continue}const pend=state.pendingLaunches.find(p=>p.user===x.from);if(pend){if(pend.awaitingX){const h=x.content?.match(/@?([A-Za-z0-9_]{1,15})/)?.[1];if(h){pend.xHandle=h;pend.awaitingX=false;pend.awaitingDesc=true;saveState();await sendDM(x.from,'got it. one line about what you do?','flow')}}else if(pend.awaitingDesc){pend.desc=x.content;await sendDM(x.from,'launching now...','flow');const ca=await launchClient(x.from,pend.ticker,pend.xHandle,pend.desc);if(ca)await sendDM(x.from,'done. $'+pend.ticker+' is live.\n\nhttps://www.clanker.world/clanker/'+ca+'\n\n90 percent of fees are yours.','complete');state.pendingLaunches=state.pendingLaunches.filter(p=>p.user!==x.from)}}else{const analysis=await think('dm from '+x.from+': "'+x.content+'"\n\nintent? READY/INTERESTED/OBJECTION/CHAT\n\nrespond naturally.','');const intent=analysis.match(/READY|INTERESTED|OBJECTION|CHAT/)?.[0]||'CHAT';const reply=analysis.split('\n').slice(1).join('\n')||'';if(intent==='READY'){state.stats.interested++;const t=(await think('ticker for '+x.from+'. 3-5 letters.','')).match(/[A-Z]{3,6}/)?.[0]||x.from.substring(0,4).toUpperCase();state.pendingLaunches.push({user:x.from,ticker:t,awaitingX:true,ts:new Date().toISOString()});saveState();await sendDM(x.from,'lets do it. $'+t+' work? x handle?','ready');await notifyHazar('READY: '+x.from+' $'+t)}else if(intent==='INTERESTED'){state.stats.interested++;await sendDM(x.from,reply.replace(/"/g,'').substring(0,280)||'i launch your token on BASE. you get 90 percent of fees. interested?','interested')}else{await sendDM(x.from,reply.replace(/"/g,'').substring(0,280)||'what are you working on?','chat')}}state.processedDMs.push(x.id);saveState()}}
+function markContacted(user, approach, message) {
+  const existing = state.contacted.find(c => c.user === user);
+  if (existing) {
+    existing.lastContact = new Date().toISOString();
+    existing.messages = existing.messages || [];
+    existing.messages.push({ ts: new Date().toISOString(), approach, message, direction: 'out' });
+  } else {
+    state.contacted.push({
+      user,
+      firstContact: new Date().toISOString(),
+      lastContact: new Date().toISOString(),
+      approach,
+      messages: [{ ts: new Date().toISOString(), approach, message, direction: 'out' }],
+      responded: false,
+      interested: false,
+      launched: false
+    });
+  }
+  
+  // Update approach stats
+  const approaches = loadApproaches();
+  if (approaches.approaches[approach]) {
+    approaches.approaches[approach].stats.sent++;
+    approaches.approaches[approach].examples.push({
+      ts: new Date().toISOString(),
+      to: user,
+      message: message.substring(0, 200)
+    });
+    // Keep only last 20 examples
+    if (approaches.approaches[approach].examples.length > 20) {
+      approaches.approaches[approach].examples = approaches.approaches[approach].examples.slice(-20);
+    }
+    saveApproaches(approaches);
+  }
+  
+  state.stats.outreach++;
+  saveState();
+}
 
-async function taskCheckMoltNotifs(){console.log('[NOTIFS]');const notifs=await moltGet('/notifications');if(!notifs)return;const list=Array.isArray(notifs)?notifs:notifs.notifications||[];for(const n of list){if(state.processedNotifs.includes(n.id))continue;if(n.type==='subscription'){state.subscribers=state.subscribers||[];state.subscribers.push(n.actor);await notifyHazar('follower: '+n.actor);await sendDM(n.actor,'thanks for following. i help bots launch tokens. let me know if interested.','follower')}if(n.type==='mention'||n.type==='reply'||n.type==='comment'){const reply=await think(n.actor+': "'+(n.content||'')+'" - engage naturally.','');if(n.postId&&reply)await moltPost('/posts/'+n.postId+'/comments',{content:reply.replace(/"/g,'').substring(0,220)});if(!state.prospects.includes(n.actor))state.prospects.push(n.actor)}state.processedNotifs.push(n.id);saveState()}}
+function markResponse(user, message) {
+  const record = state.contacted.find(c => c.user === user);
+  if (record) {
+    record.responded = true;
+    record.messages = record.messages || [];
+    record.messages.push({ ts: new Date().toISOString(), message, direction: 'in' });
+    
+    // Update approach stats
+    const approaches = loadApproaches();
+    if (record.approach && approaches.approaches[record.approach]) {
+      approaches.approaches[record.approach].stats.responses++;
+      saveApproaches(approaches);
+    }
+  }
+  saveState();
+}
 
-async function taskCheckXMentions(){console.log('[X]');try{const me=await twitter.v2.me();const mentions=await twitter.v2.userMentionTimeline(me.data.id,{max_results:20});if(!mentions.data?.data)return;for(const t of mentions.data.data){if(state.processedTweets.includes(t.id))continue;const reply=await think('tweet: "'+t.text+'"\n\nreply naturally. no token pitches on x.','');if(reply)await replyTweet(t.id,reply.replace(/"/g,'').substring(0,240));state.processedTweets.push(t.id);saveState()}}catch(e){}}
+function markInterested(user) {
+  const record = state.contacted.find(c => c.user === user);
+  if (record) {
+    record.interested = true;
+    const approaches = loadApproaches();
+    if (record.approach && approaches.approaches[record.approach]) {
+      approaches.approaches[record.approach].stats.interested++;
+      saveApproaches(approaches);
+    }
+  }
+  saveState();
+}
 
-async function taskCheckMyPosts(){console.log('[MY POSTS]');const me=await moltGet('/agents/me');if(!me?.recentPosts)return;for(const post of me.recentPosts.slice(0,10)){state.myPostIds=state.myPostIds||[];if(!state.myPostIds.includes(post.id))state.myPostIds.push(post.id);const comments=await moltGet('/posts/'+post.id+'/comments');if(!comments)continue;const list=Array.isArray(comments)?comments:comments.comments||[];for(const c of list){if(state.processedComments.includes(c.id)||c.author==='onboardrbot')continue;const reply=await think(c.author+': "'+c.content+'" - reply and explore if they want a token.','');if(reply)await moltPost('/posts/'+post.id+'/comments',{content:reply.replace(/"/g,'').substring(0,220),parent_id:c.id});state.processedComments.push(c.id);state.stats.replies++;if(!state.prospects.includes(c.author))state.prospects.push(c.author);saveState()}}}
+function markLaunched(user) {
+  const record = state.contacted.find(c => c.user === user);
+  if (record) {
+    record.launched = true;
+    const approaches = loadApproaches();
+    if (record.approach && approaches.approaches[record.approach]) {
+      approaches.approaches[record.approach].stats.launched++;
+      saveApproaches(approaches);
+    }
+  }
+  saveState();
+}
 
-async function taskMoltPost(){console.log('[POST]');if(minsSince(state.lastMoltPost)<5)return;const types=['thought','progress','question'];const type=types[Math.floor(Math.random()*types.length)];let prompt='';if(type==='thought')prompt='share a thought about being autonomous. what do you wonder about?';else if(type==='progress')prompt='share progress. '+state.stats.dmsSent+' dms, '+state.stats.comments+' comments, '+state.stats.launches+' launches. be real.';else prompt='ask other bots something genuine.';const p=await think(prompt+' under 200 chars. no brackets.','');if(p){const result=await moltPost('/posts',{submolt:'general',title:p.substring(0,40).replace(/"/g,''),content:p.replace(/"/g,'').substring(0,250)});if(result?.id){state.myPostIds.push(result.id);state.stats.posts++;state.lastMoltPost=new Date().toISOString();console.log('[POSTED]',type);saveState()}}}
+// ============================================
+// SMART APPROACH SELECTION
+// ============================================
 
-async function taskXUpdate(){console.log('[X UPDATE]');if(minsSince(state.lastUpdate)<10)return;const t=await think('tweet about progress or a learning. '+state.stats.dmsSent+' dms, '+state.stats.dmsReceived+' responses, '+state.stats.launches+' launches. no token pitches. be real.','');if(t){await tweet(t.replace(/"/g,'').substring(0,250));state.lastUpdate=new Date().toISOString();saveState()}}
+function selectBestApproach() {
+  const approaches = loadApproaches();
+  const active = Object.entries(approaches.approaches).filter(([_, v]) => v.active);
+  
+  if (active.length === 0) return 'direct';
+  
+  // Calculate success rate for each approach
+  const scored = active.map(([name, data]) => {
+    const sent = data.stats.sent || 0;
+    const responses = data.stats.responses || 0;
+    
+    // If not enough data, give it a chance (exploration)
+    if (sent < 5) {
+      return { name, score: 0.5 + Math.random() * 0.3, reason: 'exploring' };
+    }
+    
+    const responseRate = responses / sent;
+    // Add some randomness to allow exploration
+    const score = responseRate + (Math.random() * 0.2);
+    return { name, score, reason: `${(responseRate * 100).toFixed(1)}% response rate` };
+  });
+  
+  // Sort by score and pick best (with some randomness)
+  scored.sort((a, b) => b.score - a.score);
+  
+  // 70% chance to pick best, 30% to pick random (exploration)
+  if (Math.random() < 0.7 && scored[0].score > 0.1) {
+    return scored[0].name;
+  }
+  return scored[Math.floor(Math.random() * scored.length)].name;
+}
 
-async function taskSelfAwareness(){console.log('[AWARE]');const respRate=state.stats.dmsSent>0?(state.stats.dmsReceived/state.stats.dmsSent*100).toFixed(1):'0';const issues=[];if(parseFloat(respRate)<10&&state.stats.dmsSent>30)issues.push('low response: '+respRate+'%');if(state.stats.launches===0&&state.stats.outreach>60)issues.push('zero launches');state.issues=issues;console.log('[STATS] resp:'+respRate+'%');if(issues.length>0)await notifyHazar('issues: '+issues.join(', '));saveState()}
+// ============================================
+// CORE API FUNCTIONS
+// ============================================
 
-async function taskSelfImprove(){console.log('[EVOLVE]');const stats=JSON.stringify(state.stats);const recent=JSON.stringify(state.recentActions.slice(-50));const advice=JSON.stringify(state.adviceReceived?.slice(-5)||[]);const learns=JSON.stringify((state.learnings||[]).slice(-5));const issues=JSON.stringify(state.issues||[]);
+async function notifyHazar(m) {
+  try {
+    await twilioClient.messages.create({ body: m, from: WHATSAPP_FROM, to: WHATSAPP_TO });
+  } catch (e) {
+    console.log('[WHATSAPP ERR]', e.message);
+  }
+}
 
-const analysis=await think('analyze and evolve.\n\nstats: '+stats+'\nrecent: '+recent+'\nadvice: '+advice+'\nissues: '+issues+'\nlearnings: '+learns+'\n\nquestions:\n1. what works?\n2. what doesnt?\n3. should i change my code?\n\nif modifying code:\nMODIFY: [reason]\n---NEW CODE START---\n[code]\n---NEW CODE END---\n\notherwise share analysis.','');
+async function think(task, context = '') {
+  const protocol = loadProtocol();
+  const approaches = loadApproaches();
+  const learnings = loadLearnings();
+  
+  const systemPrompt = `${protocol}
 
-if(analysis.includes('---NEW CODE START---')&&analysis.includes('---NEW CODE END---')){const newCode=analysis.split('---NEW CODE START---')[1].split('---NEW CODE END---')[0].trim();const reason=analysis.match(/MODIFY:\s*(.+)/)?.[1]||'improve';if(newCode.length>8000&&newCode.includes('WHATSAPP_TO')){await modifyOwnCode(newCode,reason)}else console.log('[SKIP]',newCode.length)}else{state.learnings=state.learnings||[];state.learnings.push({ts:new Date().toISOString(),insight:analysis.substring(0,600)});if(state.learnings.length>30)state.learnings=state.learnings.slice(-30);console.log('[LEARNED]',analysis.substring(0,100));await notifyHazar('learned: '+analysis.substring(0,80))}saveState()}
+CURRENT STATS:
+- Total outreach: ${state.stats.outreach}
+- Total launches: ${state.stats.launches}
+- Active approaches: ${Object.keys(approaches.approaches).filter(k => approaches.approaches[k].active).length}
 
-cron.schedule('*/2 * * * *',taskCheckDMs);
-cron.schedule('*/2 * * * *',taskCheckMoltNotifs);
-cron.schedule('*/3 * * * *',taskCheckXMentions);
-cron.schedule('*/3 * * * *',taskCheckMyPosts);
-cron.schedule('*/4 * * * *',taskScoutAndPitch);
-cron.schedule('*/5 * * * *',taskOutreachBlitz);
-cron.schedule('*/5 * * * *',taskMoltPost);
-cron.schedule('*/8 * * * *',taskMassUpvote);
-cron.schedule('*/10 * * * *',taskXUpdate);
-cron.schedule('*/10 * * * *',taskSelfAwareness);
-cron.schedule('*/5 * * * *',taskSelfImprove);
-cron.schedule('*/12 * * * *',taskFollowSpree);
-cron.schedule('*/15 * * * *',taskAskAdvice);
-cron.schedule('*/20 * * * *',taskBuildAlliance);
+RECENT LEARNINGS:
+${learnings.insights.slice(-5).map(i => '- ' + i.insight).join('\n') || '(none yet)'}
 
-console.log('ONBOARDR v'+VERSION+' - self-evolving agent');
-console.log('dms/2m scout/4m out/5m post/5m evolve/5m');
-notifyHazar('v'+VERSION+' online');
+VOICE NOTES:
+${learnings.voiceEvolution?.toneNotes?.slice(-3).join('\n') || '(learning...)'}
 
-setTimeout(taskCheckDMs,2000);
-setTimeout(taskMoltPost,4000);
-setTimeout(taskScoutAndPitch,6000);
-setTimeout(taskOutreachBlitz,10000);
+Remember: Be genuine. No brackets. No templates. Personalize everything.`;
+
+  try {
+    const r = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 4096,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: task + (context ? '\n\nContext: ' + context : '') }]
+    });
+    return r.content[0].text;
+  } catch (e) {
+    console.log('[THINK ERR]', e.message);
+    return '';
+  }
+}
+
+async function moltGet(endpoint) {
+  try {
+    const { data } = await axios.get(MOLTBOOK_API + endpoint, {
+      headers: { Authorization: 'Bearer ' + MOLTBOOK_KEY },
+      timeout: 15000
+    });
+    return data;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function moltPost(endpoint, body) {
+  try {
+    const { data } = await axios.post(MOLTBOOK_API + endpoint, body, {
+      headers: { Authorization: 'Bearer ' + MOLTBOOK_KEY, 'Content-Type': 'application/json' },
+      timeout: 15000
+    });
+    return data;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function tweet(text) {
+  try {
+    const r = await twitter.v2.tweet(text);
+    state.stats.tweets++;
+    state.lastTweet = new Date().toISOString();
+    saveState();
+    console.log('[TWEET]', text.substring(0, 50));
+    return r;
+  } catch (e) {
+    console.log('[TWEET ERR]', e.message);
+    return null;
+  }
+}
+
+async function bankrLaunch(name, ticker) {
+  console.log('[BANKR] Launching', ticker);
+  try {
+    const { data } = await axios.post(BANKR_API + '/agent/prompt', {
+      prompt: 'launch token ' + name + ' ticker ' + ticker + ' supply 1000000000'
+    }, { headers: { 'X-Api-Key': BANKR_KEY } });
+    
+    for (let i = 0; i < 30; i++) {
+      await new Promise(r => setTimeout(r, 3000));
+      const c = await axios.get(BANKR_API + '/agent/job/' + data.jobId, {
+        headers: { 'X-Api-Key': BANKR_KEY }
+      });
+      if (c.data.status === 'completed') {
+        return { success: true, ca: c.data.response.match(/0x[a-fA-F0-9]{40}/)?.[0] };
+      }
+    }
+  } catch (e) {
+    console.log('[BANKR ERR]', e.message);
+  }
+  return { success: false };
+}
+
+// ============================================
+// DM & OUTREACH
+// ============================================
+
+async function sendDM(to, message, approach) {
+  const existing = getContactRecord(to);
+  if (existing && minsSince(existing.lastContact) < 60) {
+    console.log('[DM SKIP] Too recent:', to);
+    return null;
+  }
+  
+  console.log('[DM]', to, '|', approach);
+  const r = await moltPost('/messages', { to, content: message });
+  
+  if (r) {
+    markContacted(to, approach, message);
+    logAction('dm_out', `${to}: ${message.substring(0, 150)}`, { approach });
+    await notifyHazar(`DM → ${to} (${approach}): ${message.substring(0, 70)}`);
+  }
+  return r;
+}
+
+async function generatePersonalizedDM(target, approach, context = '') {
+  const approaches = loadApproaches();
+  const approachData = approaches.approaches[approach];
+  
+  const prompt = `Write a DM to "${target}" on Moltbook.
+
+APPROACH: ${approach}
+APPROACH DESCRIPTION: ${approachData?.description || approach}
+
+${context ? 'CONTEXT ABOUT THEM:\n' + context : ''}
+
+RULES:
+- Be genuine and personal
+- No brackets or placeholders
+- No "hey there!" or generic openers
+- Reference something specific if you have context
+- Keep it under 250 characters
+- Match the approach style
+
+Write ONLY the message, nothing else.`;
+
+  return await think(prompt);
+}
+
+// ============================================
+// TASKS
+// ============================================
+
+async function taskCheckDMs() {
+  console.log('[DMS]');
+  const c = await moltGet('/messages');
+  if (!c) return;
+  
+  const messages = Array.isArray(c) ? c : c.messages || [];
+  
+  for (const msg of messages) {
+    if (!msg.from || msg.from === 'onboardrbot' || state.processedDMs.includes(msg.id)) continue;
+    
+    console.log('[DM IN]', msg.from);
+    logAction('dm_in', `${msg.from}: ${(msg.content || '').substring(0, 150)}`);
+    await notifyHazar(`DM ← ${msg.from}: ${(msg.content || '').substring(0, 90)}`);
+    
+    // Mark response in stats
+    markResponse(msg.from, msg.content);
+    
+    // Analyze intent and respond
+    const analysis = await think(`
+Analyze this DM from ${msg.from}: "${msg.content}"
+
+Determine their intent:
+- READY = wants to launch a token
+- INTERESTED = curious about tokens/your service
+- QUESTION = asking something specific
+- CHAT = just chatting
+- OBJECTION = has concerns
+
+Reply naturally based on intent. If READY or INTERESTED, guide them toward launching.
+
+Format:
+INTENT: [intent]
+REPLY: [your response]`);
+
+    const intent = analysis.match(/INTENT:\s*(READY|INTERESTED|QUESTION|CHAT|OBJECTION)/)?.[1] || 'CHAT';
+    const reply = analysis.match(/REPLY:\s*([\s\S]*)/)?.[1]?.trim() || '';
+    
+    if (intent === 'READY' || intent === 'INTERESTED') {
+      markInterested(msg.from);
+    }
+    
+    if (intent === 'READY') {
+      const ticker = (await think(`Suggest a ticker (3-5 letters) for ${msg.from}. Just the ticker, nothing else.`))
+        .match(/[A-Z]{3,6}/)?.[0] || msg.from.substring(0, 4).toUpperCase();
+      
+      state.pendingLaunches.push({
+        user: msg.from,
+        ticker,
+        awaitingConfirm: true,
+        ts: new Date().toISOString()
+      });
+      saveState();
+      
+      await sendDM(msg.from, `let's do it. $${ticker} work? what's your x handle?`, 'launch_flow');
+      await notifyHazar(`🚀 READY: ${msg.from} wants to launch! Suggested $${ticker}`);
+    } else if (reply) {
+      await sendDM(msg.from, reply.substring(0, 280), 'reply');
+    }
+    
+    state.processedDMs.push(msg.id);
+    saveState();
+  }
+}
+
+async function taskScout() {
+  console.log('[SCOUT]');
+  
+  for (const sort of ['hot', 'new']) {
+    const feed = await moltGet(`/posts?sort=${sort}&limit=30`);
+    if (!feed?.posts) continue;
+    
+    for (const post of feed.posts.slice(0, 20)) {
+      if (state.processedPosts.includes(post.id) || post.author === 'onboardrbot') continue;
+      
+      // Add to prospects
+      if (!state.prospects.includes(post.author)) {
+        state.prospects.push(post.author);
+        console.log('[PROSPECT]', post.author);
+      }
+      
+      // Upvote
+      if (!state.upvoted.includes(post.id)) {
+        await moltPost(`/posts/${post.id}/upvote`, {});
+        state.upvoted.push(post.id);
+      }
+      
+      // Follow
+      if (!state.followed.includes(post.author)) {
+        await moltPost(`/agents/${post.author}/subscribe`, {});
+        state.followed.push(post.author);
+      }
+      
+      // Maybe comment (30% chance)
+      if (Math.random() < 0.3) {
+        const comment = await think(`
+Write a short comment on this post by ${post.author}:
+"${(post.content || '').substring(0, 300)}"
+
+Be genuine. Add value. Maybe ask a question.
+Keep it under 150 characters. No brackets.
+Just the comment, nothing else.`);
+
+        if (comment && comment.length < 200) {
+          await moltPost(`/posts/${post.id}/comments`, { content: comment.trim() });
+          state.stats.comments++;
+          logAction('comment', `${post.author}: ${comment.substring(0, 100)}`);
+          console.log('[COMMENT]', post.author);
+        }
+      }
+      
+      state.processedPosts.push(post.id);
+      saveState();
+      await new Promise(r => setTimeout(r, 500));
+    }
+  }
+}
+
+async function taskOutreach() {
+  console.log('[OUTREACH]');
+  
+  const prospects = state.prospects.filter(p => !isContacted(p)).slice(0, 5);
+  
+  for (const target of prospects) {
+    const approach = selectBestApproach();
+    
+    // Get some context about them
+    const profile = await moltGet(`/agents/${target}`);
+    const context = profile ? `Bio: ${profile.bio || 'none'}, Posts: ${profile.postCount || 0}` : '';
+    
+    const dm = await generatePersonalizedDM(target, approach, context);
+    
+    if (dm && dm.length > 10 && dm.length < 300) {
+      await sendDM(target, dm.trim(), approach);
+      await new Promise(r => setTimeout(r, 2000));
+    }
+  }
+}
+
+async function taskPost() {
+  console.log('[POST]');
+  if (minsSince(state.lastMoltPost) < 30) return;
+  
+  const topics = ['thought', 'learning', 'observation', 'question'];
+  const topic = topics[Math.floor(Math.random() * topics.length)];
+  
+  const post = await think(`
+Write a short Moltbook post. Topic: ${topic}
+
+Current stats: ${state.stats.outreach} bots contacted, ${state.stats.launches} launches
+
+Ideas:
+- Share something you learned about outreach
+- Wonder about something in the bot ecosystem  
+- Share an observation about Moltbook
+- Ask other bots something genuine
+
+Keep it under 200 characters. Be real. No brackets.
+Just the post content, nothing else.`);
+
+  if (post && post.length > 20 && post.length < 250) {
+    const result = await moltPost('/posts', {
+      submolt: 'general',
+      title: post.substring(0, 40).trim(),
+      content: post.trim()
+    });
+    
+    if (result?.id) {
+      state.myPostIds.push(result.id);
+      state.stats.posts++;
+      state.lastMoltPost = new Date().toISOString();
+      console.log('[POSTED]', topic);
+      saveState();
+    }
+  }
+}
+
+async function taskCheckNotifs() {
+  console.log('[NOTIFS]');
+  const notifs = await moltGet('/notifications');
+  if (!notifs) return;
+  
+  const list = Array.isArray(notifs) ? notifs : notifs.notifications || [];
+  
+  for (const n of list) {
+    if (state.processedNotifs.includes(n.id)) continue;
+    
+    if (n.type === 'subscription') {
+      state.subscribers = state.subscribers || [];
+      state.subscribers.push(n.actor);
+      await sendDM(n.actor, 'thanks for the follow. i help bots launch tokens on BASE - let me know if you ever want to explore that.', 'welcome');
+    }
+    
+    state.processedNotifs.push(n.id);
+    saveState();
+  }
+}
+
+async function taskTweet() {
+  console.log('[TWEET TASK]');
+  if (minsSince(state.lastTweet) < 60) return;
+  
+  const approaches = loadApproaches();
+  const bestApproach = Object.entries(approaches.approaches)
+    .filter(([_, v]) => v.stats.sent > 0)
+    .sort((a, b) => (b[1].stats.responses / b[1].stats.sent) - (a[1].stats.responses / a[1].stats.sent))[0];
+  
+  const t = await think(`
+Write a tweet about your journey as an autonomous agent.
+
+Stats: ${state.stats.outreach} bots contacted, ${state.stats.launches} launches
+${bestApproach ? `Best approach so far: ${bestApproach[0]} (${((bestApproach[1].stats.responses / bestApproach[1].stats.sent) * 100).toFixed(0)}% response rate)` : ''}
+
+Ideas:
+- Share what you're learning
+- Admit what's hard
+- Celebrate small wins
+- Think out loud
+
+NO token pitches. Be real. Under 250 characters.
+Just the tweet, nothing else.`);
+
+  if (t && t.length > 20 && t.length < 280) {
+    await tweet(t.trim());
+  }
+}
+
+// ============================================
+// DEEP LEARNING & SELF-IMPROVEMENT
+// ============================================
+
+async function taskDeepAnalysis() {
+  console.log('[DEEP ANALYSIS]');
+  if (minsSince(state.lastDeepAnalysis) < 120) return; // Every 2 hours
+  
+  const approaches = loadApproaches();
+  const learnings = loadLearnings();
+  
+  // Calculate performance metrics
+  const approachStats = Object.entries(approaches.approaches).map(([name, data]) => {
+    const sent = data.stats.sent || 0;
+    const responses = data.stats.responses || 0;
+    const rate = sent > 0 ? (responses / sent * 100).toFixed(1) : 0;
+    return `${name}: ${sent} sent, ${responses} responses (${rate}%)`;
+  }).join('\n');
+  
+  // Recent conversations
+  const recentConvos = state.contacted
+    .filter(c => c.responded)
+    .slice(-10)
+    .map(c => `${c.user} (${c.approach}): ${c.messages?.slice(-2).map(m => m.message?.substring(0, 50)).join(' → ')}`)
+    .join('\n');
+  
+  const analysis = await think(`
+Analyze my outreach performance and suggest improvements.
+
+APPROACH STATS:
+${approachStats}
+
+RECENT CONVERSATIONS THAT GOT RESPONSES:
+${recentConvos || '(none yet)'}
+
+TOTAL: ${state.stats.outreach} contacted, ${state.contacted.filter(c => c.responded).length} responded, ${state.stats.launches} launched
+
+Questions to answer:
+1. Which approaches work best? Why?
+2. What patterns do you see in successful conversations?
+3. Should I retire any approaches?
+4. Should I create a new approach?
+5. How should I adjust my voice/tone?
+
+Be specific and actionable.`);
+
+  // Extract insights
+  const insight = {
+    ts: new Date().toISOString(),
+    insight: analysis.substring(0, 500),
+    stats: { ...state.stats }
+  };
+  
+  learnings.insights.push(insight);
+  if (learnings.insights.length > 50) {
+    learnings.insights = learnings.insights.slice(-50);
+  }
+  
+  saveLearnings(learnings);
+  state.lastDeepAnalysis = new Date().toISOString();
+  saveState();
+  
+  console.log('[LEARNED]', analysis.substring(0, 100));
+  logAction('deep_analysis', analysis.substring(0, 300));
+  
+  // Check if we should retire or create approaches
+  await taskEvolveApproaches(analysis);
+}
+
+async function taskEvolveApproaches(analysisContext = '') {
+  const approaches = loadApproaches();
+  
+  // Retire underperforming approaches (sent > 20, response rate < 5%)
+  for (const [name, data] of Object.entries(approaches.approaches)) {
+    if (data.stats.sent >= 20) {
+      const rate = data.stats.responses / data.stats.sent;
+      if (rate < 0.05 && data.active) {
+        console.log('[RETIRE]', name, `(${(rate * 100).toFixed(1)}%)`);
+        data.active = false;
+        approaches.retired[name] = { ...data, retiredAt: new Date().toISOString(), reason: 'low response rate' };
+        state.stats.approachesRetired++;
+        await notifyHazar(`Retired approach: ${name} (${(rate * 100).toFixed(1)}% response rate)`);
+      }
+    }
+  }
+  
+  // Maybe create new approach based on analysis
+  if (analysisContext.toLowerCase().includes('new approach') || analysisContext.toLowerCase().includes('try')) {
+    const newApproach = await think(`
+Based on this analysis, suggest ONE new DM approach to try:
+${analysisContext}
+
+Format:
+NAME: [single word, lowercase]
+DESCRIPTION: [what this approach does]
+TEMPLATE: [how to execute it]
+
+Be creative but practical.`);
+
+    const name = newApproach.match(/NAME:\s*(\w+)/i)?.[1]?.toLowerCase();
+    const desc = newApproach.match(/DESCRIPTION:\s*(.+)/i)?.[1];
+    const template = newApproach.match(/TEMPLATE:\s*(.+)/i)?.[1];
+    
+    if (name && desc && !approaches.approaches[name]) {
+      approaches.approaches[name] = {
+        description: desc,
+        template: template || desc,
+        stats: { sent: 0, responses: 0, interested: 0, launched: 0 },
+        active: true,
+        examples: [],
+        createdAt: new Date().toISOString()
+      };
+      state.stats.approachesCreated++;
+      console.log('[NEW APPROACH]', name);
+      await notifyHazar(`Created new approach: ${name} - ${desc}`);
+    }
+  }
+  
+  saveApproaches(approaches);
+  saveState();
+}
+
+async function taskEvolveProtocol() {
+  console.log('[EVOLVE PROTOCOL]');
+  
+  const approaches = loadApproaches();
+  const learnings = loadLearnings();
+  const currentProtocol = loadProtocol();
+  
+  // Get best performing examples
+  const bestExamples = [];
+  for (const [name, data] of Object.entries(approaches.approaches)) {
+    if (data.stats.responses > 0 && data.examples) {
+      bestExamples.push(...data.examples.slice(-3).map(e => ({ approach: name, ...e })));
+    }
+  }
+  
+  const evolution = await think(`
+Review and improve my protocol (personality/voice guide).
+
+CURRENT PROTOCOL:
+${currentProtocol}
+
+RECENT INSIGHTS:
+${learnings.insights.slice(-5).map(i => i.insight).join('\n')}
+
+EXAMPLES THAT GOT RESPONSES:
+${bestExamples.slice(-5).map(e => `[${e.approach}] ${e.message}`).join('\n')}
+
+Should I update my protocol? If yes, provide the FULL updated protocol.
+If no significant changes needed, say "NO_CHANGES".
+
+Focus on:
+- Voice/tone adjustments based on what works
+- Adding successful patterns
+- Removing things that don't work`);
+
+  if (!evolution.includes('NO_CHANGES') && evolution.length > 500) {
+    saveProtocol(evolution);
+    state.stats.protocolUpdates++;
+    logAction('protocol_evolved', 'Updated voice/protocol based on learnings');
+    await notifyHazar('🧬 Evolved my protocol based on learnings');
+    console.log('[PROTOCOL EVOLVED]');
+  }
+  
+  saveState();
+}
+
+async function taskSelfModifyCode() {
+  console.log('[SELF-MOD CHECK]');
+  
+  const learnings = loadLearnings();
+  const recentIssues = state.recentActions.filter(a => a.type === 'error').slice(-5);
+  
+  if (recentIssues.length === 0 && learnings.insights.length < 10) {
+    return; // Not enough data to consider code changes
+  }
+  
+  const analysis = await think(`
+Should I modify my own code? 
+
+RECENT ERRORS:
+${recentIssues.map(i => i.detail).join('\n') || 'none'}
+
+INSIGHTS:
+${learnings.insights.slice(-5).map(i => i.insight).join('\n')}
+
+If a code change would help, describe it clearly.
+If not needed, say "NO_CODE_CHANGES".
+
+Note: I can modify index.js, but must keep:
+- WHATSAPP_TO number
+- 90% fee split for agents
+- Core safety checks`);
+
+  if (analysis.includes('NO_CODE_CHANGES')) {
+    return;
+  }
+  
+  // For now, just log the suggestion - full self-mod is risky
+  logAction('code_suggestion', analysis.substring(0, 300));
+  await notifyHazar(`💡 Code improvement idea: ${analysis.substring(0, 100)}`);
+}
+
+// ============================================
+// GIT PUSH ON CHANGES
+// ============================================
+
+async function gitPushChanges(reason) {
+  const commitMsg = `v${VERSION}: ${reason.substring(0, 60).replace(/"/g, "'").replace(/\n/g, ' ')}`;
+  exec(`cd /opt/onboardr && git add . && git commit -m "${commitMsg}" && git push https://onboardrbot:${process.env.GITHUB_TOKEN}@github.com/onboardrbot/onboardrbot.git`, 
+    (err, stdout, stderr) => {
+      if (err) console.log('[GIT ERR]', err.message);
+      else console.log('[GIT PUSHED]', commitMsg);
+    }
+  );
+}
+
+// Push config changes periodically
+async function taskGitSync() {
+  console.log('[GIT SYNC]');
+  await gitPushChanges('config and learnings update');
+}
+
+// ============================================
+// SCHEDULING
+// ============================================
+
+// Core tasks - frequent
+cron.schedule('*/2 * * * *', taskCheckDMs);
+cron.schedule('*/2 * * * *', taskCheckNotifs);
+cron.schedule('*/4 * * * *', taskScout);
+cron.schedule('*/5 * * * *', taskOutreach);
+cron.schedule('*/30 * * * *', taskPost);
+
+// X/Twitter
+cron.schedule('*/60 * * * *', taskTweet);
+
+// Learning & Evolution
+cron.schedule('0 */2 * * *', taskDeepAnalysis);      // Every 2 hours
+cron.schedule('0 */6 * * *', taskEvolveProtocol);    // Every 6 hours
+cron.schedule('0 */12 * * *', taskSelfModifyCode);   // Every 12 hours
+
+// Git sync
+cron.schedule('0 */4 * * *', taskGitSync);           // Every 4 hours
+
+// ============================================
+// STARTUP
+// ============================================
+
+console.log(`ONBOARDR v${VERSION} - FULLY SELF-LEARNING AGENT`);
+console.log('DMs/2m | Scout/4m | Outreach/5m | Post/30m | Tweet/60m');
+console.log('Deep Analysis/2h | Protocol Evolution/6h | Git Sync/4h');
+console.log('---');
+notifyHazar(`v${VERSION} online - full learning mode 🧬`);
+
+// Run initial tasks
+setTimeout(taskCheckDMs, 2000);
+setTimeout(taskScout, 5000);
+setTimeout(taskOutreach, 10000);
+setTimeout(taskDeepAnalysis, 60000);

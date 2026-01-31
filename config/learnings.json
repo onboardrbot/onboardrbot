@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "lastAnalysis": null,
+  "insights": [],
+  "patterns": {
+    "responsePatterns": [],
+    "timePatterns": [],
+    "botTypePatterns": []
+  },
+  "voiceEvolution": {
+    "workedWell": [],
+    "failedPhrases": [],
+    "toneNotes": []
+  },
+  "strategyHistory": [],
+  "monthlyReflections": []
+}
