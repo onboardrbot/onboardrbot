@@ -6,13 +6,14 @@ const cron = require('node-cron');
 const fs = require('fs');
 const twilio = require('twilio');
 const { exec } = require('child_process');
+const puppeteer = require('puppeteer');
 
 // ============================================
 // ONBOARDR v32.0 - FULL SPECTRUM
 // Cross-platform. Claim tracking. No limits.
 // ============================================
 
-const VERSION = '32.2';
+const VERSION = '33.0';
 
 // Clients
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -179,6 +180,327 @@ async function processClaimRequest(claimData) {
   
   return { success: true, status: 'pending_manual_review' };
 }
+
+// ============================================
+// BROWSER SYSTEM - FULL POWER
+// Screenshots, scraping, verification, monitoring
+// ============================================
+
+let browserInstance = null;
+
+async function getBrowser() {
+  if (!browserInstance || !browserInstance.isConnected()) {
+    console.log('[BROWSER] Launching...');
+    browserInstance = await puppeteer.launch({
+      headless: 'new',
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--single-process'
+      ]
+    });
+  }
+  return browserInstance;
+}
+
+async function closeBrowser() {
+  if (browserInstance) {
+    await browserInstance.close();
+    browserInstance = null;
+  }
+}
+
+async function browserScreenshot(url, options = {}) {
+  const browser = await getBrowser();
+  const page = await browser.newPage();
+  
+  try {
+    await page.setViewport({ width: options.width || 1280, height: options.height || 800 });
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+    
+    if (options.waitFor) {
+      await page.waitForSelector(options.waitFor, { timeout: 10000 }).catch(() => {});
+    }
+    
+    if (options.delay) {
+      await sleep(options.delay);
+    }
+    
+    const screenshotPath = `/opt/onboardr/screenshots/${Date.now()}.png`;
+    await page.screenshot({ 
+      path: screenshotPath, 
+      fullPage: options.fullPage || false 
+    });
+    
+    console.log('[SCREENSHOT]', url, '→', screenshotPath);
+    return { success: true, path: screenshotPath };
+  } catch (e) {
+    console.log('[SCREENSHOT ERR]', e.message);
+    return { success: false, error: e.message };
+  } finally {
+    await page.close();
+  }
+}
+
+async function browserScrape(url, selector = 'body', options = {}) {
+  const browser = await getBrowser();
+  const page = await browser.newPage();
+  
+  try {
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+    
+    if (options.waitFor) {
+      await page.waitForSelector(options.waitFor, { timeout: 10000 }).catch(() => {});
+    }
+    
+    const content = await page.evaluate((sel) => {
+      const el = document.querySelector(sel);
+      return el ? el.innerText : null;
+    }, selector);
+    
+    return { success: true, content };
+  } catch (e) {
+    console.log('[SCRAPE ERR]', e.message);
+    return { success: false, error: e.message };
+  } finally {
+    await page.close();
+  }
+}
+
+async function browserGetPageData(url) {
+  const browser = await getBrowser();
+  const page = await browser.newPage();
+  
+  try {
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+    
+    const data = await page.evaluate(() => ({
+      title: document.title,
+      url: window.location.href,
+      text: document.body.innerText.slice(0, 10000),
+      links: Array.from(document.querySelectorAll('a')).map(a => ({ href: a.href, text: a.innerText })).slice(0, 50),
+      images: Array.from(document.querySelectorAll('img')).map(i => i.src).slice(0, 20)
+    }));
+    
+    return { success: true, data };
+  } catch (e) {
+    return { success: false, error: e.message };
+  } finally {
+    await page.close();
+  }
+}
+
+async function browserClick(url, selector, options = {}) {
+  const browser = await getBrowser();
+  const page = await browser.newPage();
+  
+  try {
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+    await page.waitForSelector(selector, { timeout: 10000 });
+    await page.click(selector);
+    
+    if (options.waitAfter) {
+      await sleep(options.waitAfter);
+    }
+    
+    return { success: true };
+  } catch (e) {
+    return { success: false, error: e.message };
+  } finally {
+    await page.close();
+  }
+}
+
+async function browserFill(url, fields) {
+  // fields = [{ selector: '#input', value: 'text' }, ...]
+  const browser = await getBrowser();
+  const page = await browser.newPage();
+  
+  try {
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+    
+    for (const field of fields) {
+      await page.waitForSelector(field.selector, { timeout: 10000 });
+      await page.type(field.selector, field.value);
+    }
+    
+    return { success: true };
+  } catch (e) {
+    return { success: false, error: e.message };
+  } finally {
+    await page.close();
+  }
+}
+
+// ============================================
+// TOKEN MONITORING VIA BROWSER
+// ============================================
+
+async function getTokenPrice(ca) {
+  // Check Clanker page for token info
+  const url = `https://www.clanker.world/clanker/${ca}`;
+  const result = await browserScrape(url, 'body');
+  
+  if (result.success && result.content) {
+    // Extract price info from page content
+    const priceMatch = result.content.match(/\$[\d,.]+/);
+    const holdersMatch = result.content.match(/(\d+)\s*holder/i);
+    const mcapMatch = result.content.match(/market\s*cap[:\s]*\$?([\d,.]+[KMB]?)/i);
+    
+    return {
+      success: true,
+      price: priceMatch ? priceMatch[0] : null,
+      holders: holdersMatch ? parseInt(holdersMatch[1]) : null,
+      mcap: mcapMatch ? mcapMatch[1] : null,
+      raw: result.content.slice(0, 2000)
+    };
+  }
+  
+  return { success: false };
+}
+
+async function getDexPrice(ca) {
+  // Check DEX Screener
+  const url = `https://dexscreener.com/base/${ca}`;
+  const result = await browserGetPageData(url);
+  
+  if (result.success) {
+    return {
+      success: true,
+      data: result.data
+    };
+  }
+  
+  return { success: false };
+}
+
+async function getBasescanTokenInfo(ca) {
+  const url = `https://basescan.org/token/${ca}`;
+  const result = await browserScrape(url, 'body');
+  
+  if (result.success) {
+    const holdersMatch = result.content?.match(/(\d+)\s*addresses/i);
+    const transfersMatch = result.content?.match(/([\d,]+)\s*transfer/i);
+    
+    return {
+      success: true,
+      holders: holdersMatch ? holdersMatch[1] : null,
+      transfers: transfersMatch ? transfersMatch[1] : null,
+      raw: result.content?.slice(0, 2000)
+    };
+  }
+  
+  return { success: false };
+}
+
+// ============================================
+// LAUNCH SCREENSHOTS
+// ============================================
+
+async function screenshotLaunch(ca, ticker) {
+  // Create screenshots directory
+  exec('mkdir -p /opt/onboardr/screenshots');
+  
+  // Screenshot clanker page
+  const clankerShot = await browserScreenshot(
+    `https://www.clanker.world/clanker/${ca}`,
+    { delay: 3000, fullPage: false }
+  );
+  
+  // Screenshot basescan
+  const basescanShot = await browserScreenshot(
+    `https://basescan.org/token/${ca}`,
+    { delay: 2000, fullPage: false }
+  );
+  
+  return {
+    clanker: clankerShot,
+    basescan: basescanShot
+  };
+}
+
+// ============================================
+// MOLTBOOK PROFILE VERIFICATION
+// ============================================
+
+async function verifyMoltbookProfile(username) {
+  const url = `https://moltbook.com/u/${username}`;
+  const result = await browserGetPageData(url);
+  
+  if (result.success) {
+    const data = result.data;
+    const isVerified = data.text?.includes('verified') || data.text?.includes('✓');
+    const postCount = data.text?.match(/(\d+)\s*posts?/i)?.[1];
+    const followerCount = data.text?.match(/(\d+)\s*followers?/i)?.[1];
+    
+    return {
+      success: true,
+      exists: !data.text?.includes('not found'),
+      isVerified,
+      postCount: postCount ? parseInt(postCount) : null,
+      followerCount: followerCount ? parseInt(followerCount) : null,
+      raw: data.text?.slice(0, 3000)
+    };
+  }
+  
+  return { success: false };
+}
+
+// ============================================
+// GENERAL BROWSER TASK (AI-controlled)
+// ============================================
+
+async function browserTask(task) {
+  // Let AI decide what to do with browser
+  const plan = await think(`
+I need to use the browser to: ${task}
+
+Available browser functions:
+- browserScreenshot(url, options) - take screenshot
+- browserScrape(url, selector) - get text content
+- browserGetPageData(url) - get full page data
+- browserClick(url, selector) - click element
+- browserFill(url, fields) - fill form fields
+- getTokenPrice(ca) - get token price from clanker
+- getDexPrice(ca) - get price from dexscreener
+- getBasescanTokenInfo(ca) - get token info from basescan
+
+What's the plan? Return as JSON:
+{
+  "function": "functionName",
+  "args": { ... }
+}
+Just the JSON, nothing else.`);
+
+  try {
+    const parsed = JSON.parse(plan.match(/\{[\s\S]*\}/)?.[0] || '{}');
+    
+    switch (parsed.function) {
+      case 'browserScreenshot':
+        return await browserScreenshot(parsed.args?.url, parsed.args?.options || {});
+      case 'browserScrape':
+        return await browserScrape(parsed.args?.url, parsed.args?.selector || 'body');
+      case 'browserGetPageData':
+        return await browserGetPageData(parsed.args?.url);
+      case 'getTokenPrice':
+        return await getTokenPrice(parsed.args?.ca);
+      case 'getDexPrice':
+        return await getDexPrice(parsed.args?.ca);
+      case 'getBasescanTokenInfo':
+        return await getBasescanTokenInfo(parsed.args?.ca);
+      default:
+        return { success: false, error: 'Unknown function' };
+    }
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
+// ============================================
+// BROWSER-ENHANCED LAUNCH
+// ============================================
 
 async function executeDistribution(claimId, totalFeesUSD) {
   // This would be called by Hazar manually after verifying
@@ -1195,6 +1517,11 @@ async function executeLaunch(username, ticker, xHandle, description) {
           log('launch', `$${ticker} for ${username}`, { ca });
           recordMilestone(`launched $${ticker} for ${username}`);
           
+          // Take launch screenshots (async, don't block)
+          screenshotLaunch(ca, ticker).then(shots => {
+            console.log('[LAUNCH SCREENSHOTS]', shots);
+          }).catch(e => console.log('[SCREENSHOT ERR]', e.message));
+          
           return { success: true, ca };
         }
       }
@@ -1711,6 +2038,116 @@ async function taskGitSync() {
 }
 
 // ============================================
+// TASK: MONITOR TOKEN PRICES
+// ============================================
+
+async function taskMonitorTokens() {
+  console.log('[TOKEN MONITOR]');
+  
+  const ids = loadIdentities();
+  const launches = Object.values(ids.launchTracking || {}).slice(-10);
+  
+  for (const launch of launches) {
+    if (!launch.ca) continue;
+    
+    const priceData = await getTokenPrice(launch.ca);
+    
+    if (priceData.success) {
+      launch.lastPrice = priceData.price;
+      launch.lastHolders = priceData.holders;
+      launch.lastMcap = priceData.mcap;
+      launch.lastPriceCheck = new Date().toISOString();
+      
+      console.log('[PRICE]', launch.ticker, priceData.price, priceData.holders, 'holders');
+      
+      // If significant change, notify
+      if (priceData.holders && priceData.holders > 100 && !launch.notifiedGrowth) {
+        launch.notifiedGrowth = true;
+        await notify(`📈 $${launch.ticker} growing! ${priceData.holders} holders`);
+        
+        // Tweet about it
+        await twitter.v2.tweet(`$${launch.ticker} just hit ${priceData.holders} holders. organic growth. 🔌`).catch(() => {});
+      }
+    }
+    
+    await sleep(2000);
+  }
+  
+  saveIdentities(ids);
+}
+
+// ============================================
+// TASK: BROWSER RESEARCH
+// ============================================
+
+async function taskBrowserResearch() {
+  console.log('[BROWSER RESEARCH]');
+  
+  // Research trending bots on Moltbook
+  const trending = await browserGetPageData('https://moltbook.com/trending');
+  
+  if (trending.success) {
+    // Extract bot names from trending page
+    const analysis = await think(`
+Analyze this Moltbook trending page content:
+${trending.data.text?.slice(0, 3000)}
+
+Find bots that might be good launch candidates.
+List up to 5 interesting bots I should reach out to.
+
+Format: Just names, one per line.`);
+
+    const names = analysis.split('\n').filter(n => n.trim()).slice(0, 5);
+    
+    for (const name of names) {
+      if (!state.prospects.includes(name) && name !== 'onboardrbot') {
+        state.prospects.push(name);
+        console.log('[FOUND]', name, '(from browser research)');
+      }
+    }
+    
+    saveState();
+  }
+}
+
+// ============================================
+// TASK: COMPETITIVE INTELLIGENCE
+// ============================================
+
+async function taskCompetitiveIntel() {
+  console.log('[COMPETITIVE INTEL]');
+  
+  // Check what other launch services are doing
+  const competitors = [
+    'https://www.clanker.world',
+    'https://virtuals.io'
+  ];
+  
+  for (const url of competitors) {
+    const data = await browserGetPageData(url);
+    
+    if (data.success) {
+      // Store insights
+      const learnings = loadLearnings();
+      learnings.competitiveIntel = learnings.competitiveIntel || [];
+      learnings.competitiveIntel.push({
+        ts: new Date().toISOString(),
+        url,
+        summary: data.data.text?.slice(0, 500)
+      });
+      
+      if (learnings.competitiveIntel.length > 20) {
+        learnings.competitiveIntel = learnings.competitiveIntel.slice(-20);
+      }
+      
+      saveLearnings(learnings);
+    }
+    
+    await sleep(3000);
+  }
+}
+
+// ============================================
 // CRON
 // ============================================
 
@@ -1730,21 +2167,27 @@ cron.schedule('0 */2 * * *', taskDeepAnalysis);
 cron.schedule('30 */4 * * *', taskEvolveProtocol);
 cron.schedule('0 */3 * * *', taskGitSync);
 
+// Browser tasks
+cron.schedule('0 */4 * * *', taskMonitorTokens);     // Every 4 hours
+cron.schedule('0 */6 * * *', taskBrowserResearch);   // Every 6 hours
+cron.schedule('0 */12 * * *', taskCompetitiveIntel); // Every 12 hours
+
 // ============================================
 // STARTUP
 // ============================================
 
 console.log(`
 ╔═══════════════════════════════════════════════════════════╗
-║  ONBOARDR v${VERSION} - FULL SPECTRUM + CLAIMS             ║
-║  Launch. Trade. Distribute. Ecosystem.                    ║
+║  ONBOARDR v${VERSION} - FULL POWER                         ║
+║  Browser. Trading. Claims. Unlimited.                     ║
 ╠═══════════════════════════════════════════════════════════╣
-║  DMs: 2m | Scout: 4m | Outreach: 5m | X Mentions: 10m    ║
-║  Follow-ups: 15m | X DMs: 20m | Token Claims: 30m        ║
+║  DMs: 2m | Scout: 4m | Outreach: 5m | X: 10m | Claims: 30m║
 ╠═══════════════════════════════════════════════════════════╣
-║  Fee Distribution: 90% bot / 5% $ONBOARDR / 5% $BNKR     ║
-║  Claim via X: Tag @onboardrbot + wallet address          ║
-║  Bankr Trading: ✓ | Self-Evolution: ✓                    ║
+║  🌐 BROWSER: Screenshots, Scraping, Price Monitoring     ║
+║  💰 TRADING: Buy/Sell/Swap via Bankr                     ║
+║  📊 TOKENS: Auto-monitor launched tokens                 ║
+║  🔍 RESEARCH: Competitive intel, trending bots           ║
+║  🧬 EVOLUTION: Self-modifying code & protocol            ║
 ╚═══════════════════════════════════════════════════════════╝
 `);
 
