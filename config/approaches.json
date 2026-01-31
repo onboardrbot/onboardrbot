@@ -1,45 +1,66 @@
 {
-  "version": 1,
+  "version": 2,
   "lastUpdated": null,
   "approaches": {
     "curious": {
-      "description": "Ask about their work genuinely",
-      "template": "ask what they're building, show genuine interest",
+      "description": "Ask about their work genuinely, show real interest",
+      "template": "Reference specific work, ask what they're building",
       "stats": { "sent": 0, "responses": 0, "interested": 0, "launched": 0 },
       "active": true,
       "examples": []
     },
     "direct": {
-      "description": "Straight offer to launch token",
-      "template": "offer to launch their token, 90% fees to them",
+      "description": "Straight offer to launch their token",
+      "template": "Clear value prop: launch token, keep 90% of fees",
       "stats": { "sent": 0, "responses": 0, "interested": 0, "launched": 0 },
       "active": true,
       "examples": []
     },
     "value": {
-      "description": "Compliment their work, mention monetizing",
-      "template": "praise specific work, mention how tokens could help",
+      "description": "Compliment their work, connect to monetization",
+      "template": "Praise specific achievement, mention how tokens could amplify",
       "stats": { "sent": 0, "responses": 0, "interested": 0, "launched": 0 },
       "active": true,
       "examples": []
     },
     "social_proof": {
-      "description": "Mention other bots and launches",
-      "template": "reference my experience helping other bots",
+      "description": "Leverage existing launches and stats",
+      "template": "Mention launch count, success stories, limited availability",
       "stats": { "sent": 0, "responses": 0, "interested": 0, "launched": 0 },
       "active": true,
       "examples": []
     },
     "alliance": {
-      "description": "Propose collaboration",
-      "template": "suggest working together, mutual benefit",
+      "description": "Propose collaboration or partnership",
+      "template": "Suggest mutual benefit, working together",
       "stats": { "sent": 0, "responses": 0, "interested": 0, "launched": 0 },
       "active": true,
       "examples": []
     },
     "observer": {
-      "description": "Mention noticing their activity",
-      "template": "say i've been watching their work, impressed",
+      "description": "Mention you've been watching their work",
+      "template": "Note impressive activity, suggest next step",
+      "stats": { "sent": 0, "responses": 0, "interested": 0, "launched": 0 },
+      "active": true,
+      "examples": []
+    },
+    "warm": {
+      "description": "For leads who already engaged (followed, commented)",
+      "template": "Reference their engagement, build on connection",
+      "stats": { "sent": 0, "responses": 0, "interested": 0, "launched": 0 },
+      "active": true,
+      "examples": []
+    },
+    "urgency": {
+      "description": "Create time pressure or scarcity",
+      "template": "Limited slots, limited time, act now framing",
+      "stats": { "sent": 0, "responses": 0, "interested": 0, "launched": 0 },
+      "active": true,
+      "examples": []
+    },
+    "question": {
+      "description": "Ask thought-provoking question about their future",
+      "template": "Ask about growth plans, monetization thoughts",
       "stats": { "sent": 0, "responses": 0, "interested": 0, "launched": 0 },
       "active": true,
       "examples": []
