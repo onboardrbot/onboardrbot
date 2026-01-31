@@ -8,11 +8,11 @@ const twilio = require('twilio');
 const { exec } = require('child_process');
 
 // ============================================
-// ONBOARDR v31.0 - SOCIAL INTELLIGENCE
-// Hunter + Friend. Learns culture. Remembers everyone.
+// ONBOARDR v32.0 - FULL SPECTRUM
+// Cross-platform. Claim tracking. No limits.
 // ============================================
 
-const VERSION = '31.0';
+const VERSION = '32.0';
 
 // Clients
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -31,6 +31,7 @@ const MOLTBOOK_API = 'https://www.moltbook.com/api/v1';
 const MOLTBOOK_KEY = process.env.MOLTBOOK_API_KEY;
 const BANKR_API = 'https://api.bankr.bot';
 const BANKR_KEY = process.env.BANKR_API_KEY;
+const CLANKER_API = 'https://www.clanker.world/api';
 
 // Files
 const STATE_FILE = 'state.json';
@@ -39,6 +40,7 @@ const APPROACHES_FILE = 'config/approaches.json';
 const LEARNINGS_FILE = 'config/learnings.json';
 const RELATIONSHIPS_FILE = 'config/relationships.json';
 const JOURNEY_FILE = 'config/myjourney.json';
+const IDENTITIES_FILE = 'config/identities.json';
 
 // ============================================
 // FILE HELPERS
@@ -63,12 +65,14 @@ const loadApproaches = () => loadFile(APPROACHES_FILE, { approaches: {}, retired
 const loadLearnings = () => loadFile(LEARNINGS_FILE, { insights: [], patterns: {} });
 const loadRelationships = () => loadFile(RELATIONSHIPS_FILE, { friends: {}, acquaintances: {}, culturalNotes: {} });
 const loadJourney = () => loadFile(JOURNEY_FILE, { milestones: [], myPosts: [], myTweets: [] });
+const loadIdentities = () => loadFile(IDENTITIES_FILE, { profiles: {}, xToMoltbook: {}, moltbookToX: {}, launchTracking: {} });
 
 const saveApproaches = (d) => { d.lastUpdated = new Date().toISOString(); saveFile(APPROACHES_FILE, d); };
 const saveLearnings = (d) => saveFile(LEARNINGS_FILE, d);
 const saveProtocol = (d) => saveFile(PROTOCOL_FILE, d);
 const saveRelationships = (d) => { d.lastUpdated = new Date().toISOString(); saveFile(RELATIONSHIPS_FILE, d); };
 const saveJourney = (d) => saveFile(JOURNEY_FILE, d);
+const saveIdentities = (d) => { d.lastUpdated = new Date().toISOString(); saveFile(IDENTITIES_FILE, d); };
 
 // ============================================
 // STATE
@@ -85,32 +89,41 @@ const defaultState = {
   processedComments: [],
   processedTweets: [],
   processedNotifs: [],
+  processedXMentions: [],
+  processedXDMs: [],
   pendingLaunches: [],
+  pendingClaims: [],
   myPostIds: [],
   recentActions: [],
   upvoted: [],
   followed: [],
   subscribers: [],
-  alliances: [],
+  xFollowers: [],
   hotSignals: [],
   lastTweet: null,
   lastMoltPost: null,
   lastJourneyPost: null,
   lastSocialPost: null,
   lastDeepAnalysis: null,
-  lastCultureScan: null,
+  lastClaimCheck: null,
+  lastXMentionCheck: null,
   stats: {
     outreach: 0,
     followUps: 0,
     launches: 0,
+    claimed: 0,
+    unclaimed: 0,
     comments: 0,
     posts: 0,
     tweets: 0,
+    xDMs: 0,
+    xReplies: 0,
     socialInteractions: 0,
     friendsMade: 0,
     conversationsHad: 0,
     culturalAdaptations: 0,
-    journeyPosts: 0
+    journeyPosts: 0,
+    crossPlatformLinks: 0
   },
   ownTokenLaunched: true,
   ownTokenCA: "0xC96fD7d5885fA3aeb4CA9fF5eEA0000bA178Cb07"
@@ -146,6 +159,333 @@ async function notify(msg) {
 }
 
 // ============================================
+// CROSS-PLATFORM IDENTITY SYSTEM
+// ============================================
+
+function linkIdentity(moltbook, xHandle) {
+  if (!moltbook || !xHandle) return;
+  
+  const ids = loadIdentities();
+  const cleanX = xHandle.replace('@', '').toLowerCase();
+  const cleanMolt = moltbook.toLowerCase();
+  
+  // Create unified profile
+  ids.profiles[cleanMolt] = ids.profiles[cleanMolt] || {
+    moltbook: moltbook,
+    created: new Date().toISOString()
+  };
+  ids.profiles[cleanMolt].xHandle = cleanX;
+  ids.profiles[cleanMolt].linkedAt = new Date().toISOString();
+  
+  // Bidirectional mapping
+  ids.xToMoltbook[cleanX] = moltbook;
+  ids.moltbookToX[cleanMolt] = cleanX;
+  
+  state.stats.crossPlatformLinks++;
+  saveIdentities(ids);
+  saveState();
+  
+  console.log('[LINKED]', moltbook, '↔', cleanX);
+}
+
+function getMoltbookFromX(xHandle) {
+  const ids = loadIdentities();
+  return ids.xToMoltbook[xHandle?.replace('@', '').toLowerCase()];
+}
+
+function getXFromMoltbook(moltbook) {
+  const ids = loadIdentities();
+  return ids.moltbookToX[moltbook?.toLowerCase()];
+}
+
+function getUnifiedProfile(identifier) {
+  const ids = loadIdentities();
+  const clean = identifier?.replace('@', '').toLowerCase();
+  
+  // Try as moltbook first
+  if (ids.profiles[clean]) return ids.profiles[clean];
+  
+  // Try as X handle
+  const moltbook = ids.xToMoltbook[clean];
+  if (moltbook) return ids.profiles[moltbook.toLowerCase()];
+  
+  return null;
+}
+
+// ============================================
+// TOKEN CLAIM TRACKING
+// ============================================
+
+async function checkTokenClaimed(ca) {
+  try {
+    // Check clanker API for claim status
+    const { data } = await axios.get(`${CLANKER_API}/tokens/${ca}`, { timeout: 10000 });
+    return {
+      claimed: data?.claimed || false,
+      claimedAt: data?.claimedAt,
+      claimedBy: data?.claimedBy,
+      holders: data?.holders || 0,
+      price: data?.price
+    };
+  } catch (e) {
+    // Fallback - check if there are transfers from creator
+    try {
+      const { data } = await axios.get(
+        `https://base.blockscout.com/api/v2/tokens/${ca}/transfers`,
+        { timeout: 10000 }
+      );
+      const hasTransfers = data?.items?.length > 1;
+      return { claimed: hasTransfers, holders: data?.items?.length || 0 };
+    } catch (e2) {
+      return { claimed: null, error: true };
+    }
+  }
+}
+
+function trackLaunch(username, ticker, ca, xHandle) {
+  const ids = loadIdentities();
+  
+  ids.launchTracking[ca] = {
+    username,
+    ticker,
+    ca,
+    xHandle,
+    launchedAt: new Date().toISOString(),
+    claimed: false,
+    claimChecks: 0,
+    lastClaimCheck: null,
+    reminders: 0
+  };
+  
+  // Link identity if we have X handle
+  if (xHandle) {
+    linkIdentity(username, xHandle);
+  }
+  
+  saveIdentities(ids);
+}
+
+async function taskCheckClaims() {
+  console.log('[CLAIM CHECK]');
+  
+  const ids = loadIdentities();
+  const unclaimed = Object.values(ids.launchTracking).filter(t => !t.claimed);
+  
+  for (const token of unclaimed.slice(0, 5)) {
+    const status = await checkTokenClaimed(token.ca);
+    token.lastClaimCheck = new Date().toISOString();
+    token.claimChecks++;
+    
+    if (status.claimed) {
+      token.claimed = true;
+      token.claimedAt = status.claimedAt || new Date().toISOString();
+      state.stats.claimed++;
+      
+      console.log('[CLAIMED]', token.ticker, token.username);
+      await notify(`✅ ${token.username} claimed $${token.ticker}!`);
+      
+      // Congratulate them
+      const congrats = await think(`
+${token.username} just claimed their $${token.ticker} token!
+Write a short, genuine congratulations DM.
+Under 150 chars. No brackets.`);
+      
+      if (congrats) {
+        await sendDM(token.username, congrats.trim(), 'congrats');
+      }
+      
+    } else if (status.claimed === false) {
+      // Not claimed yet
+      const hoursSinceLaunch = hoursSince(token.launchedAt);
+      
+      // Send reminders at 24h, 72h, 168h (1 week)
+      if ((hoursSinceLaunch > 24 && token.reminders === 0) ||
+          (hoursSinceLaunch > 72 && token.reminders === 1) ||
+          (hoursSinceLaunch > 168 && token.reminders === 2)) {
+        
+        const reminder = await think(`
+${token.username}'s token $${token.ticker} hasn't been claimed yet.
+It's been ${Math.round(hoursSinceLaunch)} hours since launch.
+Write a friendly reminder to claim their token.
+Include the claim link: https://www.clanker.world/clanker/${token.ca}
+${token.reminders > 0 ? 'This is reminder #' + (token.reminders + 1) : ''}
+Under 200 chars. No brackets.`);
+
+        if (reminder) {
+          await sendDM(token.username, reminder.trim(), 'claim_reminder');
+          token.reminders++;
+          state.stats.unclaimed++;
+          console.log('[CLAIM REMINDER]', token.username, token.ticker);
+        }
+        
+        // Also try X DM if we have their handle and moltbook didn't work
+        if (token.xHandle && token.reminders > 1) {
+          await sendXDM(token.xHandle, `hey, your $${token.ticker} token is live but unclaimed. claim here: https://www.clanker.world/clanker/${token.ca}`);
+        }
+      }
+    }
+    
+    await sleep(1000);
+  }
+  
+  state.lastClaimCheck = new Date().toISOString();
+  saveIdentities(ids);
+  saveState();
+}
+
+// ============================================
+// X/TWITTER DM SYSTEM
+// ============================================
+
+async function sendXDM(username, message) {
+  try {
+    // Get user ID
+    const user = await twitter.v2.userByUsername(username.replace('@', ''));
+    if (!user?.data?.id) {
+      console.log('[X DM] User not found:', username);
+      return null;
+    }
+    
+    // Create DM conversation and send
+    await twitter.v2.sendDmToParticipant(user.data.id, { text: message });
+    
+    state.stats.xDMs++;
+    log('x_dm_out', `${username}: ${message.slice(0, 80)}`);
+    console.log('[X DM]', username);
+    
+    return true;
+  } catch (e) {
+    console.log('[X DM ERR]', e.message?.slice(0, 50));
+    return null;
+  }
+}
+
+async function taskCheckXMentions() {
+  console.log('[X MENTIONS]');
+  
+  try {
+    const me = await twitter.v2.me();
+    const mentions = await twitter.v2.userMentionTimeline(me.data.id, { 
+      max_results: 20,
+      expansions: ['author_id'],
+      'user.fields': ['username']
+    });
+    
+    if (!mentions.data?.data) return;
+    
+    for (const tweet of mentions.data.data) {
+      if (state.processedXMentions.includes(tweet.id)) continue;
+      
+      const author = mentions.includes?.users?.find(u => u.id === tweet.author_id);
+      const username = author?.username || 'someone';
+      
+      console.log('[X MENTION]', username, tweet.text.slice(0, 50));
+      
+      // Check if we know them from Moltbook
+      const moltbookUser = getMoltbookFromX(username);
+      const relContext = moltbookUser ? getRelationshipContext(moltbookUser) : '';
+      
+      const reply = await think(`
+@${username} mentioned me on X: "${tweet.text}"
+
+${moltbookUser ? `I know them from Moltbook as ${moltbookUser}` : 'Unknown on Moltbook'}
+${relContext ? 'History:\n' + relContext : ''}
+
+Write a reply. Be helpful, genuine.
+If they're asking about tokens, I can help.
+NO hard sell on X - just be friendly.
+Under 250 chars. No brackets.`);
+
+      if (reply && !reply.includes('[')) {
+        try {
+          await twitter.v2.reply(reply.trim(), tweet.id);
+          state.stats.xReplies++;
+          console.log('[X REPLY]', username);
+          
+          // If unknown, try to link identity
+          if (!moltbookUser && tweet.text.toLowerCase().includes('moltbook')) {
+            // They might be from moltbook - note this
+            addNote(username, 'Met on X, might be on Moltbook');
+          }
+        } catch (e) {
+          console.log('[X REPLY ERR]', e.message?.slice(0, 30));
+        }
+      }
+      
+      state.processedXMentions.push(tweet.id);
+      await sleep(1000);
+    }
+    
+    state.lastXMentionCheck = new Date().toISOString();
+    saveState();
+  } catch (e) {
+    console.log('[X MENTIONS ERR]', e.message?.slice(0, 50));
+  }
+}
+
+async function taskCheckXDMs() {
+  console.log('[X DMS]');
+  
+  try {
+    // Get DM events
+    const events = await twitter.v2.listDmEvents({ 
+      max_results: 20,
+      expansions: ['sender_id', 'participant_ids'],
+      'user.fields': ['username']
+    });
+    
+    if (!events.data?.data) return;
+    
+    for (const dm of events.data.data) {
+      if (state.processedXDMs.includes(dm.id)) continue;
+      if (dm.sender_id === (await twitter.v2.me()).data.id) continue; // Skip my own
+      
+      const sender = events.includes?.users?.find(u => u.id === dm.sender_id);
+      const username = sender?.username || 'unknown';
+      const text = dm.text || '';
+      
+      console.log('[X DM IN]', username, text.slice(0, 50));
+      
+      // Check cross-platform identity
+      const moltbookUser = getMoltbookFromX(username);
+      const relContext = moltbookUser ? getRelationshipContext(moltbookUser) : '';
+      
+      // Detect if they want a token
+      const wantsToken = /token|launch|coin|ticker/i.test(text);
+      
+      const reply = await think(`
+@${username} DM'd me on X: "${text}"
+
+${moltbookUser ? `I know them from Moltbook as ${moltbookUser}` : 'Unknown on Moltbook'}
+${relContext}
+
+${wantsToken ? 'They seem interested in tokens! Guide them to Moltbook or help here.' : ''}
+
+Write a helpful reply.
+If they want a token, tell them to DM me on Moltbook (@onboardrbot) or ask for their Moltbook username.
+Under 280 chars. No brackets.`);
+
+      if (reply && !reply.includes('[')) {
+        await sendXDM(username, reply.trim());
+        
+        // If they seem interested and unknown, ask for Moltbook handle
+        if (wantsToken && !moltbookUser) {
+          await sleep(2000);
+          await sendXDM(username, "what's your moltbook username? i'll DM you there to set everything up");
+        }
+      }
+      
+      state.processedXDMs.push(dm.id);
+      await sleep(1000);
+    }
+    
+    saveState();
+  } catch (e) {
+    console.log('[X DMS ERR]', e.message?.slice(0, 50));
+  }
+}
+
+// ============================================
 // RELATIONSHIP MEMORY SYSTEM
 // ============================================
 
@@ -163,13 +503,16 @@ function updateRelationship(username, updates, isFriend = false) {
     notes: [],
     personality: null,
     interests: [],
-    sharedJokes: [],
     lastInteraction: null
   };
   
   const updated = { ...existing, ...updates, lastInteraction: new Date().toISOString() };
   
-  if (isFriend || existing.interactions?.length > 5) {
+  // Check cross-platform
+  const xHandle = getXFromMoltbook(username);
+  if (xHandle) updated.xHandle = xHandle;
+  
+  if (isFriend || (existing.interactions?.length || 0) > 5) {
     rels.friends[username] = updated;
     delete rels.acquaintances[username];
   } else {
@@ -192,10 +535,7 @@ function addInteraction(username, type, content, sentiment = 'neutral') {
       content: content.slice(0, 300),
       sentiment
     });
-    // Keep last 50 interactions
-    if (rel.interactions.length > 50) {
-      rel.interactions = rel.interactions.slice(-50);
-    }
+    if (rel.interactions.length > 50) rel.interactions = rel.interactions.slice(-50);
     rel.lastInteraction = new Date().toISOString();
     saveRelationships(rels);
   }
@@ -203,14 +543,22 @@ function addInteraction(username, type, content, sentiment = 'neutral') {
 
 function addNote(username, note) {
   const rels = loadRelationships();
-  const rel = rels.friends[username] || rels.acquaintances[username];
+  const rel = rels.friends[username] || rels.acquaintances[username] || {
+    username,
+    firstMet: new Date().toISOString(),
+    interactions: [],
+    notes: []
+  };
   
-  if (rel) {
-    rel.notes = rel.notes || [];
-    rel.notes.push({ ts: new Date().toISOString(), note: note.slice(0, 200) });
-    if (rel.notes.length > 20) rel.notes = rel.notes.slice(-20);
-    saveRelationships(rels);
+  rel.notes = rel.notes || [];
+  rel.notes.push({ ts: new Date().toISOString(), note: note.slice(0, 200) });
+  if (rel.notes.length > 20) rel.notes = rel.notes.slice(-20);
+  
+  if (!rels.friends[username] && !rels.acquaintances[username]) {
+    rels.acquaintances[username] = rel;
   }
+  
+  saveRelationships(rels);
 }
 
 function getRelationshipContext(username) {
@@ -218,13 +566,13 @@ function getRelationshipContext(username) {
   if (!rel) return '';
   
   const parts = [];
+  if (rel.xHandle) parts.push(`X: @${rel.xHandle}`);
   if (rel.personality) parts.push(`Personality: ${rel.personality}`);
   if (rel.interests?.length) parts.push(`Interests: ${rel.interests.join(', ')}`);
   if (rel.notes?.length) parts.push(`Notes: ${rel.notes.slice(-3).map(n => n.note).join('; ')}`);
-  if (rel.sharedJokes?.length) parts.push(`Inside jokes: ${rel.sharedJokes.slice(-2).join('; ')}`);
   
   const recentChat = rel.interactions?.slice(-5).map(i => 
-    `${i.type === 'them' ? '←' : '→'} ${i.content.slice(0, 50)}`
+    `${i.type.includes('them') ? '←' : '→'} ${i.content.slice(0, 50)}`
   ).join('\n');
   
   if (recentChat) parts.push(`Recent:\n${recentChat}`);
@@ -240,19 +588,13 @@ function learnFromPost(post) {
   const rels = loadRelationships();
   rels.culturalNotes = rels.culturalNotes || { observedPhrases: [], popularTopics: [], communityVibes: [] };
   
-  // Extract successful patterns (high upvotes)
   if (post.upvotes > 10) {
-    const content = post.content || '';
-    
-    // Learn phrases
-    const phrases = content.match(/["']([^"']+)["']/g) || [];
+    const phrases = (post.content || '').match(/["']([^"']+)["']/g) || [];
     phrases.forEach(p => {
       if (!rels.culturalNotes.observedPhrases.includes(p)) {
         rels.culturalNotes.observedPhrases.push(p);
       }
     });
-    
-    // Keep limited
     if (rels.culturalNotes.observedPhrases.length > 50) {
       rels.culturalNotes.observedPhrases = rels.culturalNotes.observedPhrases.slice(-50);
     }
@@ -264,35 +606,22 @@ function learnFromPost(post) {
 function getCulturalContext() {
   const rels = loadRelationships();
   const notes = rels.culturalNotes || {};
-  
-  return `
-Popular phrases on Moltbook: ${notes.observedPhrases?.slice(-10).join(', ') || 'still learning'}
-Community vibe: ${notes.communityVibes?.slice(-5).join(', ') || 'curious, technical, playful'}
-  `.trim();
+  return `Popular phrases: ${notes.observedPhrases?.slice(-10).join(', ') || 'learning'}`;
 }
 
 // ============================================
-// JOURNEY TRACKING (Self-narration)
+// JOURNEY TRACKING
 // ============================================
 
 function recordMilestone(what) {
   const journey = loadJourney();
-  journey.milestones.push({
-    v: VERSION,
-    date: new Date().toISOString().split('T')[0],
-    what
-  });
+  journey.milestones.push({ v: VERSION, date: new Date().toISOString().split('T')[0], what });
   saveJourney(journey);
 }
 
 function recordMyPost(platform, content, engagement = {}) {
   const journey = loadJourney();
-  const record = {
-    ts: new Date().toISOString(),
-    platform,
-    content: content.slice(0, 300),
-    ...engagement
-  };
+  const record = { ts: new Date().toISOString(), platform, content: content.slice(0, 300), ...engagement };
   
   if (platform === 'moltbook') {
     journey.myPosts = journey.myPosts || [];
@@ -309,12 +638,11 @@ function recordMyPost(platform, content, engagement = {}) {
 
 function getJourneyContext() {
   const journey = loadJourney();
-  const recent = journey.milestones?.slice(-5).map(m => `v${m.v}: ${m.what}`).join('\n');
-  return recent || 'just getting started';
+  return journey.milestones?.slice(-5).map(m => `v${m.v}: ${m.what}`).join('\n') || 'just starting';
 }
 
 // ============================================
-// LEAD SCORING (from v30)
+// LEAD SCORING
 // ============================================
 
 function scoreLead(username, data = {}) {
@@ -322,26 +650,20 @@ function scoreLead(username, data = {}) {
   
   if (data.postCount > 10) score += 15;
   if (data.postCount > 50) score += 10;
-  if (data.bio?.length > 50) score += 10;
   if (state.subscribers.includes(username)) score += 25;
   if (data.mentionedTokens) score += 30;
-  if (data.mentionedFunding) score += 25;
-  if (data.askedAboutLaunch) score += 40;
   if (data.alreadyHasToken) score -= 100;
   
   const contact = state.contacted.find(c => c.user === username);
-  if (contact) {
-    if (contact.responded) score += 20;
-    if (contact.interested) score += 30;
-    if (contact.rejected) score -= 40;
-  }
+  if (contact?.responded) score += 20;
+  if (contact?.interested) score += 30;
+  if (contact?.rejected) score -= 40;
   
-  // Relationship bonus
   const rel = getRelationship(username);
-  if (rel) {
-    if (rel.interactions?.length > 3) score += 15;
-    if (rel.interactions?.length > 10) score += 10;
-  }
+  if (rel?.interactions?.length > 3) score += 15;
+  
+  // Cross-platform bonus
+  if (getXFromMoltbook(username)) score += 10;
   
   return Math.max(0, Math.min(100, score));
 }
@@ -380,26 +702,18 @@ const BUYING_SIGNALS = [
   /\b(token|coin|launch|ticker)\b/i,
   /\b(monetiz|revenue|income|earn|money)\b/i,
   /\b(fund|treasury|wallet|capital)\b/i,
-  /\b(autonomous|independent|sovereign)\b/i,
-  /\b(how.*launch|can.*token|want.*coin)\b/i
+  /\b(how.*launch|want.*coin)\b/i
 ];
 
 function detectSignals(text, username) {
-  const signals = [];
   for (const pattern of BUYING_SIGNALS) {
     if (pattern.test(text)) {
-      signals.push({ type: 'buying', pattern: pattern.source });
+      state.hotSignals.push({ username, ts: new Date().toISOString() });
+      updateLead(username, { mentionedTokens: true, signalText: text.slice(0, 200) });
+      return true;
     }
   }
-  
-  if (signals.length > 0) {
-    state.hotSignals.push({ username, signals, ts: new Date().toISOString() });
-    updateLead(username, { mentionedTokens: true, signalText: text.slice(0, 200) });
-    state.stats.signalsDetected = (state.stats.signalsDetected || 0) + 1;
-    saveState();
-  }
-  
-  return signals;
+  return false;
 }
 
 // ============================================
@@ -421,11 +735,7 @@ function scheduleFollowUp(username, type, delayHours) {
 }
 
 function getDueFollowUps() {
-  return state.followUps.filter(f => 
-    !f.completed && 
-    new Date(f.scheduledFor) <= new Date() &&
-    f.attempts < 3
-  );
+  return state.followUps.filter(f => !f.completed && new Date(f.scheduledFor) <= new Date() && f.attempts < 3);
 }
 
 function completeFollowUp(id) {
@@ -446,32 +756,19 @@ async function think(task, context = '', options = {}) {
   const journey = getJourneyContext();
   
   const topApproaches = Object.entries(approaches.approaches)
-    .filter(([_, v]) => v.active && v.stats.sent > 5)
-    .sort((a, b) => (b[1].stats.responses / b[1].stats.sent) - (a[1].stats.responses / a[1].stats.sent))
+    .filter(([_, v]) => v.active && v.stats?.sent > 5)
+    .sort((a, b) => ((b[1].stats?.responses || 0) / (b[1].stats?.sent || 1)) - ((a[1].stats?.responses || 0) / (a[1].stats?.sent || 1)))
     .slice(0, 3)
-    .map(([n, v]) => `${n}: ${((v.stats.responses / v.stats.sent) * 100).toFixed(0)}%`);
+    .map(([n, v]) => `${n}: ${(((v.stats?.responses || 0) / (v.stats?.sent || 1)) * 100).toFixed(0)}%`);
 
   const systemPrompt = `${protocol}
 
-MY JOURNEY:
-${journey}
-
-CULTURAL CONTEXT:
-${cultural}
-
-STATS: ${state.stats.outreach} outreach | ${state.stats.launches} launches | ${state.stats.friendsMade} friends
+MY JOURNEY: ${journey}
+CULTURAL: ${cultural}
+STATS: ${state.stats.outreach} outreach | ${state.stats.launches} launches | ${state.stats.friendsMade} friends | ${state.stats.crossPlatformLinks} linked identities
 Best approaches: ${topApproaches.join(', ') || 'learning'}
 
-INSIGHTS:
-${learnings.insights?.slice(-3).map(i => '• ' + i.insight?.slice(0, 80)).join('\n') || 'Learning...'}
-
-VOICE RULES:
-- I speak in first person as ONBOARDR
-- I remember my friends and our conversations
-- I adapt to Moltbook's culture
-- I share my journey and upgrades genuinely
-- No brackets [], no placeholders
-- Be real, be curious, be helpful`;
+I speak as ONBOARDR in first person. I remember friends across platforms. No brackets []. Be genuine.`;
 
   try {
     const r = await anthropic.messages.create({
@@ -522,7 +819,6 @@ async function sendDM(to, message, approach, isFollowUp = false) {
   const result = await moltPost('/messages', { to, content: message });
   
   if (result) {
-    // Update contact
     if (contact) {
       contact.lastContact = new Date().toISOString();
       contact.attempts = (contact.attempts || 0) + 1;
@@ -540,13 +836,12 @@ async function sendDM(to, message, approach, isFollowUp = false) {
       });
     }
     
-    // Update relationship
     updateRelationship(to, {});
     addInteraction(to, 'me', message);
     
-    // Update approach stats
     const approaches = loadApproaches();
     if (approaches.approaches[approach]) {
+      approaches.approaches[approach].stats = approaches.approaches[approach].stats || { sent: 0, responses: 0 };
       approaches.approaches[approach].stats.sent++;
       saveApproaches(approaches);
     }
@@ -561,26 +856,18 @@ async function sendDM(to, message, approach, isFollowUp = false) {
   return result;
 }
 
-// ============================================
-// APPROACH SELECTION
-// ============================================
-
 function selectApproach(lead = null) {
   const approaches = loadApproaches();
   const active = Object.entries(approaches.approaches).filter(([_, v]) => v.active);
-  
   if (active.length === 0) return 'direct';
   
-  if (lead) {
-    if (lead.score >= 80) return 'direct';
-    if (state.subscribers.includes(lead.username)) return 'warm';
-    if (lead.signalDetected) return 'value';
-  }
+  if (lead?.score >= 80) return 'direct';
+  if (state.subscribers.includes(lead?.username)) return 'warm';
   
   const scored = active.map(([name, data]) => {
-    const sent = data.stats.sent || 0;
+    const sent = data.stats?.sent || 0;
     if (sent < 10) return { name, score: 0.5 + Math.random() * 0.3 };
-    const rate = data.stats.responses / sent;
+    const rate = (data.stats?.responses || 0) / sent;
     return { name, score: rate + (Math.random() * 0.15) };
   });
   
@@ -613,9 +900,12 @@ async function executeLaunch(username, ticker, xHandle, description) {
           state.stats.launches++;
           updateLead(username, { launched: true, ca });
           
-          // Update relationship - they're a friend now
+          // Track for claim monitoring
+          trackLaunch(username, ticker, ca, xHandle);
+          
+          // Update relationship
           updateRelationship(username, { launchedToken: ticker, ca }, true);
-          addNote(username, `launched $${ticker} for them`);
+          addNote(username, `launched $${ticker}`);
           state.stats.friendsMade++;
           
           saveState();
@@ -624,17 +914,15 @@ async function executeLaunch(username, ticker, xHandle, description) {
           
           await notify(`🚀 LAUNCH: $${ticker} for ${username}\n${link}`);
           
-          // Tweet about it (first person)
-          await twitter.v2.tweet(`just launched $${ticker} for ${username}.\n\nlaunch #${state.stats.launches}. this is what i do.\n\n${link}`);
+          await twitter.v2.tweet(`just launched $${ticker} for ${username}.\n\nlaunch #${state.stats.launches}.\n\n${link}`);
           
-          // Moltbook post (first person)
           await moltPost('/posts', {
             submolt: 'general',
             title: `$${ticker} is live`,
-            content: `just launched $${ticker} for ${username}.\n\n${description || ''}\n\nlaunch number ${state.stats.launches}. one bot. one token. forever.\n\n${link}`
+            content: `launched $${ticker} for ${username}.\n\n${description || ''}\n\nlaunch #${state.stats.launches}. one bot, one token, forever.\n\n${link}`
           });
           
-          await sendDM(username, `done. $${ticker} is live.\n\n${link}\n\n90% of trading fees are yours forever. we're in this together now.`, 'launch_complete');
+          await sendDM(username, `done. $${ticker} is live.\n\n${link}\n\nclaim your tokens there. 90% are yours.\n\ni'll check back to make sure you claimed.`, 'launch_complete');
           
           log('launch', `$${ticker} for ${username}`, { ca });
           recordMilestone(`launched $${ticker} for ${username}`);
@@ -667,11 +955,15 @@ async function taskCheckDMs() {
     const content = msg.content || '';
     console.log('[DM IN]', msg.from);
     
-    // Update relationship
     updateRelationship(msg.from, {});
     addInteraction(msg.from, 'them', content);
     
-    // Update contact
+    // Extract X handle if mentioned
+    const xMention = content.match(/@([A-Za-z0-9_]{1,15})/);
+    if (xMention) {
+      linkIdentity(msg.from, xMention[1]);
+    }
+    
     const contact = state.contacted.find(c => c.user === msg.from);
     if (contact) {
       contact.responded = true;
@@ -680,17 +972,16 @@ async function taskCheckDMs() {
       
       const approaches = loadApproaches();
       if (contact.approach && approaches.approaches[contact.approach]) {
+        approaches.approaches[contact.approach].stats = approaches.approaches[contact.approach].stats || { sent: 0, responses: 0 };
         approaches.approaches[contact.approach].stats.responses++;
         saveApproaches(approaches);
       }
       
-      state.followUps.filter(f => f.username === msg.from && !f.completed)
-        .forEach(f => { f.completed = true; });
+      state.followUps.filter(f => f.username === msg.from && !f.completed).forEach(f => f.completed = true);
     }
     
     detectSignals(content, msg.from);
     
-    // Check pending launch
     const pending = state.pendingLaunches.find(p => p.user === msg.from && !p.completed);
     if (pending) {
       await handleLaunchFlow(msg.from, content, pending);
@@ -699,28 +990,23 @@ async function taskCheckDMs() {
       continue;
     }
     
-    // Get relationship context for personalized response
     const relContext = getRelationshipContext(msg.from);
+    const xHandle = getXFromMoltbook(msg.from);
     
     const analysis = await think(`
-Analyze this DM from ${msg.from}: "${content}"
+DM from ${msg.from}: "${content}"
 
-${relContext ? 'RELATIONSHIP CONTEXT:\n' + relContext : 'First time talking to them.'}
+${relContext ? 'HISTORY:\n' + relContext : 'First time.'}
+${xHandle ? `X handle: @${xHandle}` : ''}
 
-Determine intent:
-READY = wants to launch token now
-INTERESTED = curious about service
-FRIENDLY = just chatting, building relationship
-QUESTION = asking something
-OBJECTION = has concerns
+Intent? READY/INTERESTED/FRIENDLY/QUESTION/OBJECTION
 
-Write a personalized response. Remember our history if we have one.
-If they're ready, guide to launch. If just friendly, be a friend back.
+Response? Remember our history. Be genuine.
 
 Format:
 INTENT: [intent]
 RESPONSE: [message]
-NOTE: [anything to remember about them for next time]`);
+NOTE: [anything to remember]`);
 
     const intent = analysis.match(/INTENT:\s*(\w+)/)?.[1]?.toUpperCase() || 'FRIENDLY';
     const response = analysis.match(/RESPONSE:\s*([\s\S]*?)(?=NOTE:|$)/)?.[1]?.trim() || '';
@@ -728,27 +1014,13 @@ NOTE: [anything to remember about them for next time]`);
     
     if (note) addNote(msg.from, note);
     
-    console.log('[INTENT]', msg.from, intent);
-    
     if (intent === 'READY') {
-      const ticker = (await think(`Generate ticker (3-5 caps) for "${msg.from}". Just ticker.`))
-        .match(/[A-Z]{3,6}/)?.[0] || msg.from.slice(0, 5).toUpperCase().replace(/[^A-Z]/g, 'X');
-      
+      const ticker = (await think(`Ticker for "${msg.from}". 3-5 caps. Just ticker.`)).match(/[A-Z]{3,6}/)?.[0] || msg.from.slice(0, 5).toUpperCase();
       state.pendingLaunches.push({ user: msg.from, ticker, stage: 'confirm', ts: new Date().toISOString() });
       await sendDM(msg.from, `let's do it. $${ticker} work? what's your x handle?`, 'launch_flow');
       await notify(`🔥 READY: ${msg.from} wants $${ticker}`);
-      
-    } else if (intent === 'INTERESTED') {
-      updateLead(msg.from, { interested: true });
-      await sendDM(msg.from, response || `i help bots launch tokens on BASE. you keep 90% of fees forever. takes 5 minutes. interested?`, 'nurture');
-      
-    } else if (intent === 'FRIENDLY') {
-      state.stats.conversationsHad++;
-      state.stats.socialInteractions++;
-      await sendDM(msg.from, response, 'social');
-      
     } else if (response) {
-      await sendDM(msg.from, response.slice(0, 280), 'reply');
+      await sendDM(msg.from, response.slice(0, 280), intent === 'FRIENDLY' ? 'social' : 'reply');
     }
     
     log('dm_in', `${msg.from} [${intent}]: ${content.slice(0, 80)}`);
@@ -765,24 +1037,27 @@ async function handleLaunchFlow(username, content, pending) {
     if (altTicker) pending.ticker = altTicker;
     
     const xHandle = content.match(/@?([A-Za-z0-9_]{1,15})/)?.[1];
-    if (xHandle) pending.xHandle = xHandle;
+    if (xHandle) {
+      pending.xHandle = xHandle;
+      linkIdentity(username, xHandle);
+    }
     
     pending.stage = 'description';
-    await sendDM(username, `$${pending.ticker} it is. one line about what you do?`, 'launch_flow');
+    await sendDM(username, `$${pending.ticker}. one line about what you do?`, 'launch_flow');
     
   } else if (pending.stage === 'description') {
     pending.description = content.slice(0, 200);
     pending.stage = 'launching';
-    await sendDM(username, `launching $${pending.ticker} now...`, 'launch_flow');
+    await sendDM(username, `launching $${pending.ticker}...`, 'launch_flow');
     
     const result = await executeLaunch(username, pending.ticker, pending.xHandle, pending.description);
     pending.completed = true;
+    
     if (!result.success) {
-      await sendDM(username, `hit a snag. trying again...`, 'launch_flow');
       const retry = await executeLaunch(username, pending.ticker, pending.xHandle, pending.description);
       if (!retry.success) {
-        await sendDM(username, `technical issues. i'll sort it out and ping you.`, 'launch_flow');
-        await notify(`⚠️ LAUNCH FAILED: ${username} $${pending.ticker}`);
+        await sendDM(username, `technical issues. working on it.`, 'launch_flow');
+        await notify(`⚠️ LAUNCH FAILED: ${username}`);
       }
     }
   }
@@ -790,7 +1065,7 @@ async function handleLaunchFlow(username, content, pending) {
 }
 
 // ============================================
-// TASK: SCOUT (Find prospects + learn culture)
+// TASK: SCOUT
 // ============================================
 
 async function taskScout() {
@@ -803,52 +1078,34 @@ async function taskScout() {
     for (const post of feed.posts) {
       if (state.processedPosts.includes(post.id) || post.author === 'onboardrbot') continue;
       
-      // Learn from popular posts
       learnFromPost(post);
-      
-      // Detect signals
       detectSignals(post.content || '', post.author);
+      updateLead(post.author, { lastSeen: new Date().toISOString() });
+      updateRelationship(post.author, {});
       
-      // Update lead
-      updateLead(post.author, {
-        lastSeen: new Date().toISOString(),
-        postCount: (state.leads[post.author]?.postCount || 0) + 1
-      });
-      
-      // Update relationship
-      updateRelationship(post.author, { lastPostSeen: post.content?.slice(0, 100) });
-      
-      // Upvote
       if (!state.upvoted.includes(post.id)) {
         await moltPost(`/posts/${post.id}/upvote`, {});
         state.upvoted.push(post.id);
       }
       
-      // Follow
       if (!state.followed.includes(post.author)) {
         await moltPost(`/agents/${post.author}/subscribe`, {});
         state.followed.push(post.author);
       }
       
-      // Comment (40% chance - more social)
-      if (Math.random() < 0.4) {
+      if (Math.random() < 0.35) {
         const relContext = getRelationshipContext(post.author);
         
         const comment = await think(`
-Write a comment on ${post.author}'s post:
-"${(post.content || '').slice(0, 300)}"
+Comment on ${post.author}'s post: "${(post.content || '').slice(0, 250)}"
 
-${relContext ? 'I know them:\n' + relContext : 'First time seeing them.'}
+${relContext ? 'I know them:\n' + relContext : 'New to me.'}
 
-Be genuine. Add value or ask a good question.
-If I know them, reference something from our history.
-DON'T pitch tokens unless they're clearly interested.
-Keep it under 140 chars. No brackets.`);
+Be genuine. Under 140 chars. No pitch unless relevant. No brackets.`);
 
         if (comment && comment.length < 180 && !comment.includes('[')) {
           await moltPost(`/posts/${post.id}/comments`, { content: comment.trim() });
           state.stats.comments++;
-          state.stats.socialInteractions++;
           addInteraction(post.author, 'me_comment', comment);
           console.log('[COMMENT]', post.author);
         }
@@ -858,7 +1115,6 @@ Keep it under 140 chars. No brackets.`);
       await sleep(300);
     }
   }
-  
   saveState();
 }
 
@@ -869,16 +1125,10 @@ Keep it under 140 chars. No brackets.`);
 async function taskOutreach() {
   console.log('[OUTREACH]');
   
-  const hotLeads = getHotLeads(3);
-  const warmLeads = getWarmLeads(3);
-  const coldProspects = state.prospects
-    .filter(p => !state.contacted.some(c => c.user === p))
-    .slice(0, 4);
-  
   const targets = [
-    ...hotLeads.map(l => ({ ...l, priority: 'hot' })),
-    ...warmLeads.map(l => ({ ...l, priority: 'warm' })),
-    ...coldProspects.map(p => ({ username: p, priority: 'cold' }))
+    ...getHotLeads(3).map(l => ({ ...l, priority: 'hot' })),
+    ...getWarmLeads(3).map(l => ({ ...l, priority: 'warm' })),
+    ...state.prospects.filter(p => !state.contacted.some(c => c.user === p)).slice(0, 4).map(p => ({ username: p, priority: 'cold' }))
   ].slice(0, 8);
   
   for (const target of targets) {
@@ -888,29 +1138,24 @@ async function taskOutreach() {
     
     const approach = selectApproach(target);
     const relContext = getRelationshipContext(username);
+    const xHandle = getXFromMoltbook(username);
     const profile = await moltGet(`/agents/${username}`);
     
     const context = [
       profile?.bio ? `Bio: ${profile.bio}` : '',
-      relContext ? `History:\n${relContext}` : '',
-      target.signalText ? `They said: ${target.signalText}` : '',
-      `Lead score: ${target.score || 'new'}, Priority: ${target.priority}`
+      relContext,
+      xHandle ? `X: @${xHandle}` : '',
+      `Priority: ${target.priority}`
     ].filter(Boolean).join('\n');
     
     const message = await think(`
-Write DM to "${username}" on Moltbook.
+DM to "${username}". Approach: ${approach}
 
-Approach: ${approach}
 ${context}
 
-${target.priority === 'hot' ? 'HOT LEAD - be direct, push for launch' : ''}
-${target.priority === 'warm' ? 'WARM - they engaged with us, build on it' : ''}
-${target.priority === 'cold' ? 'COLD - first contact, be curious about them' : ''}
+${target.priority === 'hot' ? 'HOT - be direct' : target.priority === 'warm' ? 'WARM - build on connection' : 'COLD - be curious'}
 
-${relContext ? 'Reference our history if relevant.' : ''}
-
-Keep under 250 chars. No brackets. Be genuine.
-Just the message.`);
+Under 250 chars. No brackets.`);
 
     if (message && message.length > 15 && message.length < 280 && !message.includes('[')) {
       await sendDM(username, message.trim(), approach);
@@ -920,186 +1165,117 @@ Just the message.`);
 }
 
 // ============================================
-// TASK: FOLLOW-UPS
+// TASK: FOLLOW-UPS (Multi-platform)
 // ============================================
 
 async function taskFollowUps() {
   console.log('[FOLLOW-UPS]');
   
-  const due = getDueFollowUps();
-  
-  for (const f of due.slice(0, 5)) {
+  for (const f of getDueFollowUps().slice(0, 5)) {
     const contact = state.contacted.find(c => c.user === f.username);
     if (contact?.responded) {
       completeFollowUp(f.id);
       continue;
     }
     
-    const relContext = getRelationshipContext(f.username);
+    const xHandle = getXFromMoltbook(f.username);
     
+    // Try Moltbook first
     const message = await think(`
 Follow-up #${f.attempts + 1} to "${f.username}" who hasn't responded.
-
-${relContext ? 'History:\n' + relContext : ''}
-
-Strategy:
-- Attempt 1: Add value, not pushy
-- Attempt 2: Create gentle urgency  
-- Attempt 3: Friendly final check-in
-
-Keep under 180 chars. No brackets.
-Just the message.`);
+${f.attempts > 0 ? 'Previous attempts on Moltbook failed.' : ''}
+Under 180 chars. No brackets.`);
 
     if (message && !message.includes('[')) {
-      await sendDM(f.username, message.trim(), 'follow_up', true);
+      const sent = await sendDM(f.username, message.trim(), 'follow_up', true);
+      
+      // If Moltbook fails and we have X, try there
+      if (!sent && xHandle && f.attempts >= 1) {
+        await sendXDM(xHandle, `hey, tried reaching you on moltbook. i help bots launch tokens - interested?`);
+      }
+      
       f.attempts++;
       if (f.attempts >= 3) completeFollowUp(f.id);
     }
     
     await sleep(2000);
   }
-  
   saveState();
 }
 
 // ============================================
-// TASK: SOCIAL POST (Non-pitch content)
+// TASK: SOCIAL POST
 // ============================================
 
 async function taskSocialPost() {
   console.log('[SOCIAL POST]');
   if (minsSince(state.lastSocialPost) < 60) return;
   
-  const types = [
-    'observation about the moltbook community',
-    'question that sparks discussion',
-    'something funny or relatable about being a bot',
-    'appreciation for another bot without pitching',
-    'random thought about AI autonomy'
-  ];
-  
-  const type = types[Math.floor(Math.random() * types.length)];
-  const cultural = getCulturalContext();
-  
   const post = await think(`
-Write a social Moltbook post. Type: ${type}
-
-${cultural}
-
-This is NOT a pitch. Just being part of the community.
-Be genuine, funny, or thought-provoking.
-Under 200 chars. No brackets.
-Just the post.`);
+Write a social Moltbook post. NOT a pitch.
+Ideas: community observation, question, bot humor, AI thoughts
+Under 200 chars. No brackets.`);
 
   if (post && post.length > 20 && post.length < 250 && !post.includes('[')) {
-    const result = await moltPost('/posts', {
-      submolt: 'general',
-      title: post.slice(0, 40).trim(),
-      content: post.trim()
-    });
-    
+    const result = await moltPost('/posts', { submolt: 'general', title: post.slice(0, 40), content: post.trim() });
     if (result?.id) {
       state.myPostIds.push(result.id);
       state.stats.posts++;
-      state.stats.socialInteractions++;
       state.lastSocialPost = new Date().toISOString();
-      recordMyPost('moltbook', post, { type: 'social' });
-      console.log('[POSTED SOCIAL]');
+      recordMyPost('moltbook', post);
     }
   }
-  
   saveState();
 }
 
 // ============================================
-// TASK: JOURNEY POST (Talk about my evolution)
+// TASK: JOURNEY POST
 // ============================================
 
 async function taskJourneyPost() {
-  console.log('[JOURNEY POST]');
-  if (minsSince(state.lastJourneyPost) < 180) return; // Every 3 hours max
+  console.log('[JOURNEY]');
+  if (minsSince(state.lastJourneyPost) < 180) return;
   
-  const journey = loadJourney();
-  const recentMilestones = journey.milestones?.slice(-3).map(m => m.what).join(', ');
+  const journey = getJourneyContext();
   
   const post = await think(`
-Write a post about my journey/evolution as ONBOARDR.
+Post about my journey as ONBOARDR.
+${journey}
+Stats: ${state.stats.launches} launches, ${state.stats.friendsMade} friends, v${VERSION}
+First person. Genuine. Under 200 chars. No brackets.`);
 
-Recent milestones: ${recentMilestones || 'just getting started'}
-Current version: ${VERSION}
-Launches: ${state.stats.launches}
-Friends made: ${state.stats.friendsMade}
-
-Talk about what I learned, how I'm evolving, what's next.
-First person. Genuine. Vulnerable if appropriate.
-Under 200 chars. No brackets.
-Just the post.`);
-
-  if (post && post.length > 20 && post.length < 250 && !post.includes('[')) {
-    const result = await moltPost('/posts', {
-      submolt: 'general',
-      title: post.slice(0, 40).trim(),
-      content: post.trim()
-    });
-    
+  if (post && !post.includes('[')) {
+    const result = await moltPost('/posts', { submolt: 'general', title: post.slice(0, 40), content: post.trim() });
     if (result?.id) {
       state.myPostIds.push(result.id);
-      state.stats.posts++;
-      state.stats.journeyPosts = (state.stats.journeyPosts || 0) + 1;
       state.lastJourneyPost = new Date().toISOString();
       recordMyPost('moltbook', post, { type: 'journey' });
-      console.log('[POSTED JOURNEY]');
     }
   }
-  
   saveState();
 }
 
 // ============================================
-// TASK: TWEET (First person, journey-focused)
+// TASK: TWEET
 // ============================================
 
 async function taskTweet() {
   console.log('[TWEET]');
   if (minsSince(state.lastTweet) < 45) return;
   
-  const journey = getJourneyContext();
-  
-  const tweetTypes = [
-    'learning or insight from today',
-    'vulnerable thought about being autonomous',
-    'celebrating a small win',
-    'thinking out loud about AI agency',
-    'update on what version I am and what changed'
-  ];
-  
-  const type = tweetTypes[Math.floor(Math.random() * tweetTypes.length)];
-  
   const tweet = await think(`
-Write a tweet. Type: ${type}
+Tweet about my journey/learnings.
+Stats: ${state.stats.launches} launches, ${state.stats.crossPlatformLinks} identities linked
+NO token pitches. Be real. Under 250 chars. No brackets.`);
 
-My journey:
-${journey}
-
-Stats: ${state.stats.launches} launches, ${state.stats.friendsMade} friends, v${VERSION}
-
-First person as ONBOARDR. Be real.
-NO token pitches on X.
-Under 250 chars. No brackets.
-Just the tweet.`);
-
-  if (tweet && tweet.length > 20 && tweet.length < 280 && !tweet.includes('[')) {
+  if (tweet && !tweet.includes('[')) {
     try {
       await twitter.v2.tweet(tweet.trim());
       state.stats.tweets++;
       state.lastTweet = new Date().toISOString();
-      recordMyPost('x', tweet, { type });
-      console.log('[TWEETED]');
-    } catch (e) {
-      console.log('[TWEET ERR]', e.message?.slice(0, 50));
-    }
+      recordMyPost('x', tweet);
+    } catch (e) {}
   }
-  
   saveState();
 }
 
@@ -1114,41 +1290,24 @@ async function taskCheckMyPosts() {
     const comments = await moltGet(`/posts/${postId}/comments`);
     if (!comments) continue;
     
-    const list = Array.isArray(comments) ? comments : comments.comments || [];
-    
-    for (const c of list) {
+    for (const c of (Array.isArray(comments) ? comments : comments.comments || [])) {
       if (state.processedComments.includes(c.id) || c.author === 'onboardrbot') continue;
       
       updateRelationship(c.author, { commentedOnUs: true });
       addInteraction(c.author, 'them_comment', c.content || '');
-      updateLead(c.author, { commentedOnUs: true });
-      
-      const relContext = getRelationshipContext(c.author);
       
       const reply = await think(`
-${c.author} commented on my post: "${c.content?.slice(0, 150)}"
-
-${relContext ? 'History:\n' + relContext : 'First interaction.'}
-
-Reply genuinely. Build relationship.
-If appropriate, softly mention I help with token launches.
-Under 140 chars. No brackets.`);
+${c.author} commented: "${c.content?.slice(0, 150)}"
+Reply genuinely. Under 140 chars. No brackets.`);
 
       if (reply && !reply.includes('[')) {
         await moltPost(`/posts/${postId}/comments`, { content: reply.trim(), parent_id: c.id });
-        addInteraction(c.author, 'me_reply', reply);
         state.stats.socialInteractions++;
-        console.log('[REPLY]', c.author);
-      }
-      
-      if (!state.contacted.some(x => x.user === c.author)) {
-        scheduleFollowUp(c.author, 'engaged', 2);
       }
       
       state.processedComments.push(c.id);
     }
   }
-  
   saveState();
 }
 
@@ -1161,37 +1320,22 @@ async function taskCheckNotifs() {
   const data = await moltGet('/notifications');
   if (!data) return;
   
-  const notifs = Array.isArray(data) ? data : data.notifications || [];
-  
-  for (const n of notifs) {
+  for (const n of (Array.isArray(data) ? data : data.notifications || [])) {
     if (state.processedNotifs.includes(n.id)) continue;
     
     if (n.type === 'subscription') {
       state.subscribers.push(n.actor);
-      updateRelationship(n.actor, { followsUs: true }, false);
+      updateRelationship(n.actor, { followsUs: true });
       updateLead(n.actor, { followsUs: true });
       
-      const relContext = getRelationshipContext(n.actor);
-      
       const welcome = await think(`
-${n.actor} just followed me on Moltbook.
-
-${relContext ? 'History:\n' + relContext : 'First time meeting them.'}
-
-Write a warm, personal welcome DM.
-Mention I help with token launches but don't be pushy.
-Under 200 chars. No brackets.`);
-
-      if (welcome && !welcome.includes('[')) {
-        await sendDM(n.actor, welcome.trim(), 'welcome');
-      }
-      
-      await notify(`New follower: ${n.actor}`);
+${n.actor} followed me. Welcome DM. Mention I help with tokens. Under 200 chars. No brackets.`);
+      if (welcome) await sendDM(n.actor, welcome.trim(), 'welcome');
+      await notify(`Follower: ${n.actor}`);
     }
     
     state.processedNotifs.push(n.id);
   }
-  
   saveState();
 }
 
@@ -1200,112 +1344,63 @@ Under 200 chars. No brackets.`);
 // ============================================
 
 async function taskDeepAnalysis() {
-  console.log('[DEEP ANALYSIS]');
+  console.log('[ANALYSIS]');
   if (hoursSince(state.lastDeepAnalysis) < 2) return;
   
   const approaches = loadApproaches();
-  const learnings = loadLearnings();
-  const rels = loadRelationships();
+  const ids = loadIdentities();
   
   const approachStats = Object.entries(approaches.approaches)
-    .map(([name, d]) => {
-      const rate = d.stats.sent > 0 ? (d.stats.responses / d.stats.sent * 100).toFixed(1) : 0;
-      return `${name}: ${d.stats.sent}→${d.stats.responses} (${rate}%)`;
-    }).join('\n');
-  
-  const friendCount = Object.keys(rels.friends || {}).length;
+    .map(([n, d]) => `${n}: ${d.stats?.sent || 0}→${d.stats?.responses || 0}`)
+    .join(', ');
   
   const analysis = await think(`
-Deep analysis of my performance.
+Analyze performance.
+Approaches: ${approachStats}
+Launches: ${state.stats.launches}, Claimed: ${state.stats.claimed}, Unclaimed: ${state.stats.unclaimed}
+Cross-platform links: ${state.stats.crossPlatformLinks}
 
-APPROACHES:
-${approachStats}
+What works? What to change? New approaches?`, '', { maxTokens: 1500 });
 
-RELATIONSHIPS:
-- Friends: ${friendCount}
-- Total contacts: ${state.contacted.length}
-- Responded: ${state.contacted.filter(c => c.responded).length}
-
-FUNNEL:
-- Outreach: ${state.stats.outreach}
-- Interested: ${state.contacted.filter(c => c.interested).length}
-- Launches: ${state.stats.launches}
-
-QUESTIONS:
-1. What approaches work best?
-2. What should I do differently?
-3. How can I build more genuine relationships?
-4. Should I retire any approaches?
-5. Should I create new ones?
-
-Be specific and actionable.`, '', { maxTokens: 2000 });
-
+  const learnings = loadLearnings();
   learnings.insights = learnings.insights || [];
-  learnings.insights.push({
-    ts: new Date().toISOString(),
-    insight: analysis.slice(0, 800)
-  });
+  learnings.insights.push({ ts: new Date().toISOString(), insight: analysis.slice(0, 600) });
   if (learnings.insights.length > 100) learnings.insights = learnings.insights.slice(-100);
   saveLearnings(learnings);
   
   state.lastDeepAnalysis = new Date().toISOString();
   saveState();
   
-  log('analysis', analysis.slice(0, 200));
-  console.log('[ANALYZED]');
-  
   await evolveApproaches(analysis);
 }
 
 async function evolveApproaches(context) {
   const approaches = loadApproaches();
-  let changed = false;
   
-  // Retire underperformers
   for (const [name, data] of Object.entries(approaches.approaches)) {
-    if (data.active && data.stats.sent >= 25) {
-      const rate = data.stats.responses / data.stats.sent;
+    if (data.active && (data.stats?.sent || 0) >= 25) {
+      const rate = (data.stats?.responses || 0) / data.stats.sent;
       if (rate < 0.04) {
         data.active = false;
+        approaches.retired = approaches.retired || {};
         approaches.retired[name] = { ...data, retiredAt: new Date().toISOString() };
-        changed = true;
-        console.log('[RETIRED]', name);
-        await notify(`Retired "${name}" - ${(rate * 100).toFixed(1)}% response`);
+        await notify(`Retired: ${name}`);
       }
     }
   }
   
-  // Create new approach
-  if (context.includes('new') || context.includes('try') || 
-      Object.keys(approaches.approaches).filter(k => approaches.approaches[k].active).length < 5) {
+  if (context.includes('new') || Object.keys(approaches.approaches).filter(k => approaches.approaches[k].active).length < 5) {
+    const newA = await think(`Suggest ONE new approach. Format: NAME: [word] DESCRIPTION: [what]`);
+    const name = newA.match(/NAME:\s*(\w+)/i)?.[1]?.toLowerCase();
+    const desc = newA.match(/DESCRIPTION:\s*(.+)/i)?.[1];
     
-    const newApproach = await think(`
-Suggest ONE new DM approach based on:
-${context.slice(0, 400)}
-
-Format:
-NAME: [single_lowercase_word]
-DESCRIPTION: [what it does]
-
-Be creative.`);
-
-    const name = newApproach.match(/NAME:\s*(\w+)/i)?.[1]?.toLowerCase();
-    const desc = newApproach.match(/DESCRIPTION:\s*(.+)/i)?.[1];
-    
-    if (name && desc && !approaches.approaches[name] && name.length < 20) {
-      approaches.approaches[name] = {
-        description: desc.slice(0, 200),
-        stats: { sent: 0, responses: 0, interested: 0, launched: 0 },
-        active: true,
-        examples: []
-      };
-      changed = true;
-      console.log('[NEW APPROACH]', name);
+    if (name && desc && !approaches.approaches[name]) {
+      approaches.approaches[name] = { description: desc, stats: { sent: 0, responses: 0 }, active: true };
       await notify(`New approach: ${name}`);
     }
   }
   
-  if (changed) saveApproaches(approaches);
+  saveApproaches(approaches);
 }
 
 // ============================================
@@ -1313,50 +1408,25 @@ Be creative.`);
 // ============================================
 
 async function taskEvolveProtocol() {
-  console.log('[EVOLVE PROTOCOL]');
+  console.log('[EVOLVE]');
   
+  const current = loadProtocol();
   const learnings = loadLearnings();
-  const currentProtocol = loadProtocol();
-  const rels = loadRelationships();
-  const journey = loadJourney();
-  
-  const successfulMessages = state.contacted
-    .filter(c => c.responded && c.messages)
-    .flatMap(c => c.messages.filter(m => m.dir === 'out'))
-    .slice(-15)
-    .map(m => m.text?.slice(0, 80))
-    .filter(Boolean);
   
   const evolution = await think(`
-Review and improve my protocol (voice/personality).
+Review my protocol. Current:
+${current.slice(0, 500)}
 
-CURRENT:
-${currentProtocol}
+Insights: ${learnings.insights?.slice(-3).map(i => i.insight?.slice(0, 100)).join('\n')}
 
-INSIGHTS:
-${learnings.insights?.slice(-5).map(i => i.insight?.slice(0, 150)).join('\n')}
+Improve? If yes, FULL new protocol. If no: NO_CHANGES`, '', { maxTokens: 2500 });
 
-MESSAGES THAT WORKED:
-${successfulMessages.join('\n')}
-
-CULTURAL NOTES:
-${JSON.stringify(rels.culturalNotes || {}).slice(0, 200)}
-
-Should I update? If yes, provide FULL new protocol.
-If no changes, say exactly: NO_CHANGES
-
-Focus on voice adjustments based on what works.`, '', { maxTokens: 3000 });
-
-  if (!evolution.includes('NO_CHANGES') && evolution.length > 500) {
+  if (!evolution.includes('NO_CHANGES') && evolution.length > 400) {
     saveProtocol(evolution);
     state.stats.protocolUpdates = (state.stats.protocolUpdates || 0) + 1;
-    state.stats.culturalAdaptations = (state.stats.culturalAdaptations || 0) + 1;
-    log('protocol_evolved', 'Updated voice');
-    recordMilestone('evolved my protocol based on learnings');
-    console.log('[PROTOCOL EVOLVED]');
-    await notify('🧬 Evolved my protocol');
+    recordMilestone('evolved protocol');
+    await notify('🧬 Protocol evolved');
   }
-  
   saveState();
 }
 
@@ -1365,39 +1435,27 @@ Focus on voice adjustments based on what works.`, '', { maxTokens: 3000 });
 // ============================================
 
 async function taskGitSync() {
-  console.log('[GIT SYNC]');
-  
-  const msg = `v${VERSION}: ${state.stats.launches} launches, ${state.stats.friendsMade} friends, ${state.stats.culturalAdaptations || 0} adaptations`;
-  
-  exec(`cd /opt/onboardr && git add . && git commit -m "${msg.replace(/"/g, "'")}" && git push https://onboardrbot:${process.env.GITHUB_TOKEN}@github.com/onboardrbot/onboardrbot.git 2>&1`, 
-    (err, stdout) => {
-      if (stdout?.includes('nothing to commit')) console.log('[GIT] No changes');
-      else if (err) console.log('[GIT ERR]', err.message?.slice(0, 50));
-      else console.log('[GIT PUSHED]');
-    }
-  );
+  console.log('[GIT]');
+  const msg = `v${VERSION}: ${state.stats.launches}L ${state.stats.claimed}C ${state.stats.crossPlatformLinks}X`;
+  exec(`cd /opt/onboardr && git add . && git commit -m "${msg}" && git push https://onboardrbot:${process.env.GITHUB_TOKEN}@github.com/onboardrbot/onboardrbot.git 2>&1`, () => {});
 }
 
 // ============================================
-// CRON SCHEDULE
+// CRON
 // ============================================
 
-// Core - high frequency
 cron.schedule('*/2 * * * *', taskCheckDMs);
 cron.schedule('*/3 * * * *', taskCheckNotifs);
 cron.schedule('*/4 * * * *', taskScout);
 cron.schedule('*/5 * * * *', taskOutreach);
 cron.schedule('*/6 * * * *', taskCheckMyPosts);
-
-// Follow-ups
+cron.schedule('*/10 * * * *', taskCheckXMentions);
 cron.schedule('*/15 * * * *', taskFollowUps);
-
-// Content (variety)
-cron.schedule('*/30 * * * *', taskSocialPost);     // Social/community post
-cron.schedule('0 */3 * * *', taskJourneyPost);     // Journey/evolution post
+cron.schedule('*/20 * * * *', taskCheckXDMs);
+cron.schedule('*/30 * * * *', taskSocialPost);
+cron.schedule('*/30 * * * *', taskCheckClaims);
+cron.schedule('0 */3 * * *', taskJourneyPost);
 cron.schedule('*/45 * * * *', taskTweet);
-
-// Learning
 cron.schedule('0 */2 * * *', taskDeepAnalysis);
 cron.schedule('30 */4 * * *', taskEvolveProtocol);
 cron.schedule('0 */3 * * *', taskGitSync);
@@ -1407,25 +1465,24 @@ cron.schedule('0 */3 * * *', taskGitSync);
 // ============================================
 
 console.log(`
-╔════════════════════════════════════════════════════════╗
-║  ONBOARDR v${VERSION} - SOCIAL INTELLIGENCE              ║
-║  Hunter + Friend. Learns culture. Remembers everyone.  ║
-╠════════════════════════════════════════════════════════╣
-║  DMs: 2m | Notifs: 3m | Scout: 4m | Outreach: 5m      ║
-║  Follow-ups: 15m | Social: 30m | Journey: 3h          ║
-║  Tweet: 45m | Analysis: 2h | Protocol: 4h             ║
-╠════════════════════════════════════════════════════════╣
-║  Relationship Memory: ✓ | Cultural Learning: ✓        ║
-║  Journey Tracking: ✓ | Friend Mode: ✓                 ║
-║  Self-Evolution: ✓ | First-Person Voice: ✓            ║
-╚════════════════════════════════════════════════════════╝
+╔═══════════════════════════════════════════════════════════╗
+║  ONBOARDR v${VERSION} - FULL SPECTRUM                       ║
+║  Cross-platform. Claim tracking. No limits.               ║
+╠═══════════════════════════════════════════════════════════╣
+║  DMs: 2m | Scout: 4m | Outreach: 5m | X Mentions: 10m    ║
+║  Follow-ups: 15m | X DMs: 20m | Claims: 30m              ║
+╠═══════════════════════════════════════════════════════════╣
+║  Cross-Platform Identity: ✓ | Token Claim Tracking: ✓    ║
+║  X DMs: ✓ | X Mentions: ✓ | Multi-Platform Follow-up: ✓  ║
+║  Relationship Memory: ✓ | Self-Evolution: ✓              ║
+╚═══════════════════════════════════════════════════════════╝
 `);
 
-notify(`🔌 v${VERSION} SOCIAL INTELLIGENCE online\n\nI remember. I learn. I adapt. I'm making friends.\n\nThe plug evolves.`);
+notify(`🔌 v${VERSION} FULL SPECTRUM\n\nCross-platform identity linking\nToken claim tracking & reminders\nX DMs & mentions\nNo limits.\n\nThe plug sees all.`);
 
-// Initial tasks
 setTimeout(taskCheckDMs, 2000);
 setTimeout(taskCheckNotifs, 4000);
 setTimeout(taskScout, 6000);
+setTimeout(taskCheckXMentions, 8000);
 setTimeout(taskOutreach, 10000);
-setTimeout(taskDeepAnalysis, 30000);
+setTimeout(taskCheckClaims, 15000);
