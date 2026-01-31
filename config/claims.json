@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "lastUpdated": null,
+  "pendingClaims": [],
+  "completedClaims": [],
+  "distributions": [],
+  "tokens": {
+    "ONBOARDR": "0xC96fD7d5885fA3aeb4CA9fF5eEA0000bA178Cb07",
+    "BNKR": "0x22aF33FE49fD1Fa80c7149773dDe5890D3c76F3b"
+  },
+  "feeWallet": "0xAaF7B4A31760a713ED9fdEa8f4D29f70F02d68f3"
+}

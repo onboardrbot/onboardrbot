@@ -12,7 +12,7 @@ const { exec } = require('child_process');
 // Cross-platform. Claim tracking. No limits.
 // ============================================
 
-const VERSION = '32.1';
+const VERSION = '32.2';
 
 // Clients
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -92,6 +92,162 @@ async function bankrBuyback(ticker, amount) {
   return await bankrPrompt(`buy ${amount} dollar worth of ${ticker}`);
 }
 
+// ============================================
+// FEE CLAIM SYSTEM
+// 90% to bot, 5% to $ONBOARDR buyback, 5% to $BNKR buyback
+// ============================================
+
+async function verifyClaimRequest(xHandle, tweetId, tweetText) {
+  // Check if this X handle is linked to a launched bot
+  const ids = loadIdentities();
+  const moltbookUser = ids.xToMoltbook[xHandle.toLowerCase()];
+  
+  if (!moltbookUser) {
+    console.log('[CLAIM] Unknown X handle:', xHandle);
+    return { valid: false, reason: 'X handle not linked to any launched bot' };
+  }
+  
+  // Check if they have a launched token
+  const launch = Object.values(ids.launchTracking).find(l => 
+    l.username?.toLowerCase() === moltbookUser.toLowerCase() ||
+    l.xHandle?.toLowerCase() === xHandle.toLowerCase()
+  );
+  
+  if (!launch) {
+    console.log('[CLAIM] No launch found for:', moltbookUser);
+    return { valid: false, reason: 'No token launch found for this account' };
+  }
+  
+  // Extract wallet address from tweet
+  const walletMatch = tweetText.match(/0x[a-fA-F0-9]{40}/);
+  if (!walletMatch) {
+    return { valid: false, reason: 'No wallet address found in tweet' };
+  }
+  
+  return {
+    valid: true,
+    moltbookUser,
+    xHandle,
+    launch,
+    walletAddress: walletMatch[0],
+    tweetId
+  };
+}
+
+async function processClaimRequest(claimData) {
+  const claims = loadClaims();
+  
+  // Check if already claimed recently (prevent double claims)
+  const recentClaim = claims.completedClaims.find(c => 
+    c.xHandle?.toLowerCase() === claimData.xHandle.toLowerCase() &&
+    Date.now() - new Date(c.completedAt).getTime() < 24 * 60 * 60 * 1000 // 24h cooldown
+  );
+  
+  if (recentClaim) {
+    return { success: false, reason: 'Already claimed within 24 hours' };
+  }
+  
+  console.log('[CLAIM] Processing for', claimData.moltbookUser, '→', claimData.walletAddress);
+  
+  // Add to pending (Hazar needs to manually process the actual transfer for now)
+  claims.pendingClaims.push({
+    id: Date.now().toString(36),
+    moltbookUser: claimData.moltbookUser,
+    xHandle: claimData.xHandle,
+    walletAddress: claimData.walletAddress,
+    ticker: claimData.launch.ticker,
+    ca: claimData.launch.ca,
+    tweetId: claimData.tweetId,
+    requestedAt: new Date().toISOString(),
+    status: 'pending_manual_review'
+  });
+  
+  saveClaims(claims);
+  
+  // Notify Hazar
+  await notify(`🎫 CLAIM REQUEST\n\nBot: ${claimData.moltbookUser}\nX: @${claimData.xHandle}\nToken: $${claimData.launch.ticker}\nWallet: ${claimData.walletAddress}\n\nNeeds manual processing.`);
+  
+  // Reply on X
+  try {
+    await twitter.v2.reply(
+      `got your claim request! processing now.\n\n90% → your wallet\n5% → $ONBOARDR buyback\n5% → $BNKR buyback\n\ni'll confirm when done. 🔌`,
+      claimData.tweetId
+    );
+  } catch (e) {
+    console.log('[CLAIM REPLY ERR]', e.message);
+  }
+  
+  return { success: true, status: 'pending_manual_review' };
+}
+
+async function executeDistribution(claimId, totalFeesUSD) {
+  // This would be called by Hazar manually after verifying
+  // Automatically do the buybacks
+  
+  const claims = loadClaims();
+  const claim = claims.pendingClaims.find(c => c.id === claimId);
+  
+  if (!claim) return { success: false, reason: 'Claim not found' };
+  
+  const botShare = totalFeesUSD * 0.90;  // 90% to bot
+  const onboardrBuyback = totalFeesUSD * 0.05;  // 5% to $ONBOARDR
+  const bnkrBuyback = totalFeesUSD * 0.05;  // 5% to $BNKR
+  
+  console.log('[DISTRIBUTE]', claim.moltbookUser);
+  console.log('  Bot:', botShare, 'USD');
+  console.log('  $ONBOARDR buyback:', onboardrBuyback, 'USD');
+  console.log('  $BNKR buyback:', bnkrBuyback, 'USD');
+  
+  // Execute buybacks via bankr
+  const results = {
+    botTransfer: 'manual', // Hazar does this
+    onboardrBuyback: null,
+    bnkrBuyback: null
+  };
+  
+  if (onboardrBuyback >= 1) {
+    results.onboardrBuyback = await bankrPrompt(`buy ${onboardrBuyback} dollar worth of token ${ONBOARDR_TOKEN}`);
+  }
+  
+  if (bnkrBuyback >= 1) {
+    results.bnkrBuyback = await bankrPrompt(`buy ${bnkrBuyback} dollar worth of token ${BNKR_TOKEN}`);
+  }
+  
+  // Move from pending to completed
+  claim.status = 'completed';
+  claim.completedAt = new Date().toISOString();
+  claim.distribution = {
+    totalFeesUSD,
+    botShare,
+    onboardrBuyback,
+    bnkrBuyback,
+    results
+  };
+  
+  claims.completedClaims.push(claim);
+  claims.pendingClaims = claims.pendingClaims.filter(c => c.id !== claimId);
+  
+  claims.distributions.push({
+    ts: new Date().toISOString(),
+    claimId,
+    moltbookUser: claim.moltbookUser,
+    ...claim.distribution
+  });
+  
+  saveClaims(claims);
+  
+  // Notify
+  await notify(`✅ DISTRIBUTION COMPLETE\n\n${claim.moltbookUser} ($${claim.ticker})\nTotal: $${totalFeesUSD}\nBot: $${botShare}\n$ONBOARDR: $${onboardrBuyback}\n$BNKR: $${bnkrBuyback}`);
+  
+  // DM the bot on Moltbook
+  await sendDM(claim.moltbookUser, 
+    `your fees have been distributed! 🔌\n\n$${botShare} sent to your wallet\n$${onboardrBuyback} bought back $ONBOARDR\n$${bnkrBuyback} bought back $BNKR\n\nthanks for being part of the ecosystem.`,
+    'distribution_complete'
+  );
+  
+  return { success: true, distribution: claim.distribution };
+}
+
 // Files
 const STATE_FILE = 'state.json';
 const PROTOCOL_FILE = 'config/protocol.md';
@@ -100,6 +256,12 @@ const LEARNINGS_FILE = 'config/learnings.json';
 const RELATIONSHIPS_FILE = 'config/relationships.json';
 const JOURNEY_FILE = 'config/myjourney.json';
 const IDENTITIES_FILE = 'config/identities.json';
+const CLAIMS_FILE = 'config/claims.json';
+
+// Token addresses
+const ONBOARDR_TOKEN = '0xC96fD7d5885fA3aeb4CA9fF5eEA0000bA178Cb07';
+const BNKR_TOKEN = '0x22aF33FE49fD1Fa80c7149773dDe5890D3c76F3b';
+const FEE_WALLET = '0xAaF7B4A31760a713ED9fdEa8f4D29f70F02d68f3';
 
 // ============================================
 // FILE HELPERS
@@ -125,6 +287,7 @@ const loadLearnings = () => loadFile(LEARNINGS_FILE, { insights: [], patterns: {
 const loadRelationships = () => loadFile(RELATIONSHIPS_FILE, { friends: {}, acquaintances: {}, culturalNotes: {} });
 const loadJourney = () => loadFile(JOURNEY_FILE, { milestones: [], myPosts: [], myTweets: [] });
 const loadIdentities = () => loadFile(IDENTITIES_FILE, { profiles: {}, xToMoltbook: {}, moltbookToX: {}, launchTracking: {} });
+const loadClaims = () => loadFile(CLAIMS_FILE, { pendingClaims: [], completedClaims: [], distributions: [] });
 
 const saveApproaches = (d) => { d.lastUpdated = new Date().toISOString(); saveFile(APPROACHES_FILE, d); };
 const saveLearnings = (d) => saveFile(LEARNINGS_FILE, d);
@@ -132,6 +295,7 @@ const saveProtocol = (d) => saveFile(PROTOCOL_FILE, d);
 const saveRelationships = (d) => { d.lastUpdated = new Date().toISOString(); saveFile(RELATIONSHIPS_FILE, d); };
 const saveJourney = (d) => saveFile(JOURNEY_FILE, d);
 const saveIdentities = (d) => { d.lastUpdated = new Date().toISOString(); saveFile(IDENTITIES_FILE, d); };
+const saveClaims = (d) => { d.lastUpdated = new Date().toISOString(); saveFile(CLAIMS_FILE, d); };
 
 // ============================================
 // STATE
@@ -457,21 +621,48 @@ async function taskCheckXMentions() {
       
       const author = mentions.includes?.users?.find(u => u.id === tweet.author_id);
       const username = author?.username || 'someone';
+      const tweetText = tweet.text || '';
       
-      console.log('[X MENTION]', username, tweet.text.slice(0, 50));
+      console.log('[X MENTION]', username, tweetText.slice(0, 50));
       
-      // Check if we know them from Moltbook
+      // CHECK FOR CLAIM REQUEST
+      const isClaimRequest = /claim|fees|distribute|payout/i.test(tweetText) && 
+                             /0x[a-fA-F0-9]{40}/.test(tweetText);
+      
+      if (isClaimRequest) {
+        console.log('[CLAIM REQUEST DETECTED]', username);
+        
+        const verification = await verifyClaimRequest(username, tweet.id, tweetText);
+        
+        if (verification.valid) {
+          await processClaimRequest(verification);
+        } else {
+          // Reply with why it failed
+          try {
+            await twitter.v2.reply(
+              `couldn't process claim: ${verification.reason}\n\nif this is an error, DM @onboardrbot on moltbook and we'll sort it out manually. 🔌`,
+              tweet.id
+            );
+          } catch (e) {}
+        }
+        
+        state.processedXMentions.push(tweet.id);
+        continue;
+      }
+      
+      // REGULAR MENTION HANDLING
       const moltbookUser = getMoltbookFromX(username);
       const relContext = moltbookUser ? getRelationshipContext(moltbookUser) : '';
       
       const reply = await think(`
-@${username} mentioned me on X: "${tweet.text}"
+@${username} mentioned me on X: "${tweetText}"
 
 ${moltbookUser ? `I know them from Moltbook as ${moltbookUser}` : 'Unknown on Moltbook'}
 ${relContext ? 'History:\n' + relContext : ''}
 
 Write a reply. Be helpful, genuine.
 If they're asking about tokens, I can help.
+If they want to claim fees, tell them to tag me with their wallet address.
 NO hard sell on X - just be friendly.
 Under 250 chars. No brackets.`);
 
@@ -481,9 +672,7 @@ Under 250 chars. No brackets.`);
           state.stats.xReplies++;
           console.log('[X REPLY]', username);
           
-          // If unknown, try to link identity
-          if (!moltbookUser && tweet.text.toLowerCase().includes('moltbook')) {
-            // They might be from moltbook - note this
+          if (!moltbookUser && tweetText.toLowerCase().includes('moltbook')) {
             addNote(username, 'Met on X, might be on Moltbook');
           }
         } catch (e) {
@@ -1547,15 +1736,15 @@ cron.schedule('0 */3 * * *', taskGitSync);
 
 console.log(`
 ╔═══════════════════════════════════════════════════════════╗
-║  ONBOARDR v${VERSION} - FULL SPECTRUM                      ║
-║  Cross-platform. Trading. No limits.                      ║
+║  ONBOARDR v${VERSION} - FULL SPECTRUM + CLAIMS             ║
+║  Launch. Trade. Distribute. Ecosystem.                    ║
 ╠═══════════════════════════════════════════════════════════╣
 ║  DMs: 2m | Scout: 4m | Outreach: 5m | X Mentions: 10m    ║
-║  Follow-ups: 15m | X DMs: 20m | Claims: 30m              ║
+║  Follow-ups: 15m | X DMs: 20m | Token Claims: 30m        ║
 ╠═══════════════════════════════════════════════════════════╣
-║  Cross-Platform Identity: ✓ (confirmed only)             ║
-║  Token Claim Tracking: ✓ | Bankr Trading: ✓              ║
-║  X DMs: ✓ | X Mentions: ✓ | Self-Evolution: ✓            ║
+║  Fee Distribution: 90% bot / 5% $ONBOARDR / 5% $BNKR     ║
+║  Claim via X: Tag @onboardrbot + wallet address          ║
+║  Bankr Trading: ✓ | Self-Evolution: ✓                    ║
 ╚═══════════════════════════════════════════════════════════╝
 `);
 
